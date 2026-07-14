@@ -1,0 +1,150 @@
+{
+  "query_count": 5,
+  "overall": {
+    "vanilla_clip": {
+      "hit_rate_at_1": 1.0,
+      "hit_rate_at_5": 1.0,
+      "hit_rate_at_10": 1.0,
+      "recall_at_1": 0.9,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 1.0
+    },
+    "fashionclip_only": {
+      "hit_rate_at_1": 0.0,
+      "hit_rate_at_5": 0.8,
+      "hit_rate_at_10": 0.8,
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.7,
+      "recall_at_10": 0.8,
+      "ndcg_at_10": 0.4968048931074801
+    },
+    "attribute_aware": {
+      "hit_rate_at_1": 1.0,
+      "hit_rate_at_5": 1.0,
+      "hit_rate_at_10": 1.0,
+      "recall_at_1": 0.9,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 1.0
+    }
+  },
+  "by_category": {
+    "attribute": {
+      "vanilla_clip": {
+        "hit_rate_at_1": 1.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 1.0,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0
+      },
+      "fashionclip_only": {
+        "hit_rate_at_1": 0.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 0.0,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.6309297535714575
+      },
+      "attribute_aware": {
+        "hit_rate_at_1": 1.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 1.0,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0
+      }
+    },
+    "compositional": {
+      "vanilla_clip": {
+        "hit_rate_at_1": 1.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 1.0,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0
+      },
+      "fashionclip_only": {
+        "hit_rate_at_1": 0.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 0.0,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.6309297535714575
+      },
+      "attribute_aware": {
+        "hit_rate_at_1": 1.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 1.0,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0
+      }
+    },
+    "context": {
+      "vanilla_clip": {
+        "hit_rate_at_1": 1.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 0.5,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0
+      },
+      "fashionclip_only": {
+        "hit_rate_at_1": 0.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 0.0,
+        "recall_at_5": 0.5,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.5912352048230277
+      },
+      "attribute_aware": {
+        "hit_rate_at_1": 1.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 0.5,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0
+      }
+    },
+    "style": {
+      "vanilla_clip": {
+        "hit_rate_at_1": 1.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 1.0,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0
+      },
+      "fashionclip_only": {
+        "hit_rate_at_1": 0.0,
+        "hit_rate_at_5": 0.0,
+        "hit_rate_at_10": 0.0,
+        "recall_at_1": 0.0,
+        "recall_at_5": 0.0,
+        "recall_at_10": 0.0,
+        "ndcg_at_10": 0.0
+      },
+      "attribute_aware": {
+        "hit_rate_at_1": 1.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 1.0,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0
+      }
+    }
+  }
+}

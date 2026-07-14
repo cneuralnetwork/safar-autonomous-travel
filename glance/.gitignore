@@ -1,0 +1,36 @@
+.venv/
+.agents/
+.codex/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
+.env
+
+# Downloaded assets and generated artifacts are reproducible, but not source-controlled.
+data/raw/
+data/processed/
+data/audits/
+data/evaluation/*.json
+
+# Keep portable experiment evidence and the measured PEFT adapter in the submission.
+artifacts/*
+!artifacts/evaluation/
+!artifacts/evaluation/*.json
+!artifacts/verification/
+!artifacts/verification/*.json
+!artifacts/fashionclip-lora-5000-e1/
+artifacts/fashionclip-lora-5000-e1/training_state.pt
+artifacts/fashionclip-lora-5000-e1/merges.txt
+artifacts/fashionclip-lora-5000-e1/vocab.json
+artifacts/fashionclip-lora-5000-e1/preprocessor_config.json
+artifacts/fashionclip-lora-5000-e1/special_tokens_map.json
+artifacts/fashionclip-lora-5000-e1/tokenizer_config.json
+qdrant_storage/
+models/
+static/generated/
+src/glance_retrieval/static/generated/
+tmp/
+*.aux
+*.log
+*.out

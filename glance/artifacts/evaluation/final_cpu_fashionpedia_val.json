@@ -1,0 +1,655 @@
+{
+  "query_count": 22,
+  "overall": {
+    "vanilla_clip": {
+      "hit_rate_at_1": 0.18181818181818182,
+      "hit_rate_at_5": 0.4090909090909091,
+      "hit_rate_at_10": 0.5909090909090909,
+      "recall_at_1": 0.011805555555555557,
+      "recall_at_5": 0.04810149392260829,
+      "recall_at_10": 0.09752892879359155,
+      "ndcg_at_10": 0.17313511743411827
+    },
+    "fashionclip_only": {
+      "hit_rate_at_1": 0.3181818181818182,
+      "hit_rate_at_5": 0.7272727272727273,
+      "hit_rate_at_10": 0.8636363636363636,
+      "recall_at_1": 0.019461686760073857,
+      "recall_at_5": 0.10350320866816469,
+      "recall_at_10": 0.1931617550202594,
+      "ndcg_at_10": 0.3378532798501666
+    },
+    "attribute_aware": {
+      "hit_rate_at_1": 0.5909090909090909,
+      "hit_rate_at_5": 0.8636363636363636,
+      "hit_rate_at_10": 0.9090909090909091,
+      "recall_at_1": 0.056703422297263946,
+      "recall_at_5": 0.3191387625625162,
+      "recall_at_10": 0.47858399895423354,
+      "ndcg_at_10": 0.6515127706482179
+    }
+  },
+  "by_category": {
+    "attribute": {
+      "vanilla_clip": {
+        "hit_rate_at_1": 0.25,
+        "hit_rate_at_5": 0.3333333333333333,
+        "hit_rate_at_10": 0.5833333333333334,
+        "recall_at_1": 0.013310185185185184,
+        "recall_at_5": 0.04002389486260454,
+        "recall_at_10": 0.1068092891278375,
+        "ndcg_at_10": 0.21546207893397254
+      },
+      "fashionclip_only": {
+        "hit_rate_at_1": 0.4166666666666667,
+        "hit_rate_at_5": 0.6666666666666666,
+        "hit_rate_at_10": 0.75,
+        "recall_at_1": 0.02703778375149343,
+        "recall_at_5": 0.09645982676224613,
+        "recall_at_10": 0.2263371522444103,
+        "ndcg_at_10": 0.40601633054580016
+      },
+      "attribute_aware": {
+        "hit_rate_at_1": 0.75,
+        "hit_rate_at_5": 0.9166666666666666,
+        "hit_rate_at_10": 0.9166666666666666,
+        "recall_at_1": 0.07738500597371566,
+        "recall_at_5": 0.4460916965352449,
+        "recall_at_10": 0.5779472819593787,
+        "ndcg_at_10": 0.8158447501714319
+      }
+    },
+    "compositional": {
+      "vanilla_clip": {
+        "hit_rate_at_1": 0.1,
+        "hit_rate_at_5": 0.5,
+        "hit_rate_at_10": 0.6,
+        "recall_at_1": 0.01,
+        "recall_at_5": 0.0577946127946128,
+        "recall_at_10": 0.0863924963924964,
+        "ndcg_at_10": 0.12234276363429313
+      },
+      "fashionclip_only": {
+        "hit_rate_at_1": 0.2,
+        "hit_rate_at_5": 0.8,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 0.01037037037037037,
+        "recall_at_5": 0.11195526695526696,
+        "recall_at_10": 0.15335127835127835,
+        "ndcg_at_10": 0.25605761901540636
+      },
+      "attribute_aware": {
+        "hit_rate_at_1": 0.4,
+        "hit_rate_at_5": 0.8,
+        "hit_rate_at_10": 0.9,
+        "recall_at_1": 0.031885521885521885,
+        "recall_at_5": 0.1667952417952418,
+        "recall_at_10": 0.35934805934805936,
+        "ndcg_at_10": 0.4543143952203611
+      }
+    }
+  },
+  "attribute_aware_rankings": [
+    {
+      "query_id": "black-dress",
+      "text": "A person wearing a black dress.",
+      "category": "attribute",
+      "relevant_count": 72,
+      "top_10": [
+        "fashionpedia-13598",
+        "fashionpedia-15870",
+        "fashionpedia-12360",
+        "fashionpedia-19616",
+        "fashionpedia-9703",
+        "fashionpedia-10696",
+        "fashionpedia-12719",
+        "fashionpedia-15949",
+        "fashionpedia-18337",
+        "fashionpedia-11477"
+      ],
+      "relevant_ranks": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "query_id": "gray-jacket",
+      "text": "A person wearing a gray jacket.",
+      "category": "attribute",
+      "relevant_count": 48,
+      "top_10": [
+        "fashionpedia-16101",
+        "fashionpedia-18704",
+        "fashionpedia-18669",
+        "fashionpedia-9880",
+        "fashionpedia-12921",
+        "fashionpedia-12174",
+        "coco-000000301605",
+        "fashionpedia-19806",
+        "fashionpedia-9549",
+        "fashionpedia-17240"
+      ],
+      "relevant_ranks": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "query_id": "white-t-shirt",
+      "text": "A person wearing a white t-shirt.",
+      "category": "attribute",
+      "relevant_count": 35,
+      "top_10": [
+        "fashionpedia-10395",
+        "fashionpedia-9014",
+        "coco-000000144179",
+        "fashionpedia-15758",
+        "coco-000000092974",
+        "coco-000000323288",
+        "fashionpedia-9914",
+        "coco-000000334813",
+        "fashionpedia-16931",
+        "fashionpedia-18328"
+      ],
+      "relevant_ranks": []
+    },
+    {
+      "query_id": "brown-coat",
+      "text": "A person wearing a brown coat.",
+      "category": "attribute",
+      "relevant_count": 25,
+      "top_10": [
+        "fashionpedia-17764",
+        "fashionpedia-18343",
+        "fashionpedia-12567",
+        "fashionpedia-20511",
+        "coco-000000143490",
+        "fashionpedia-17566",
+        "fashionpedia-17370",
+        "coco-000000200668",
+        "fashionpedia-19215",
+        "fashionpedia-9791"
+      ],
+      "relevant_ranks": [
+        1,
+        2,
+        3,
+        4,
+        6,
+        7,
+        9,
+        10
+      ]
+    },
+    {
+      "query_id": "black-pants",
+      "text": "A person wearing black pants.",
+      "category": "attribute",
+      "relevant_count": 124,
+      "top_10": [
+        "fashionpedia-18712",
+        "fashionpedia-19554",
+        "fashionpedia-11614",
+        "fashionpedia-15813",
+        "fashionpedia-18247",
+        "fashionpedia-11791",
+        "fashionpedia-10994",
+        "fashionpedia-19099",
+        "fashionpedia-10912",
+        "fashionpedia-15785"
+      ],
+      "relevant_ranks": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "query_id": "blue-pants",
+      "text": "A person wearing blue pants.",
+      "category": "attribute",
+      "relevant_count": 4,
+      "top_10": [
+        "coco-000000334059",
+        "coco-000000246066",
+        "controlled-modern-office-business",
+        "fashionpedia-10222",
+        "fashionpedia-12855",
+        "fashionpedia-9548",
+        "coco-000000164572",
+        "coco-000000480487",
+        "coco-000000293899",
+        "controlled-casual-city-walk"
+      ],
+      "relevant_ranks": [
+        4,
+        5,
+        6
+      ]
+    },
+    {
+      "query_id": "red-dress",
+      "text": "A person wearing a red dress.",
+      "category": "attribute",
+      "relevant_count": 16,
+      "top_10": [
+        "fashionpedia-17533",
+        "fashionpedia-9613",
+        "fashionpedia-15368",
+        "fashionpedia-18909",
+        "fashionpedia-15459",
+        "fashionpedia-11070",
+        "fashionpedia-11041",
+        "fashionpedia-18960",
+        "fashionpedia-20569",
+        "fashionpedia-9309"
+      ],
+      "relevant_ranks": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "query_id": "white-shirt",
+      "text": "A person wearing a white shirt.",
+      "category": "attribute",
+      "relevant_count": 4,
+      "top_10": [
+        "fashionpedia-10395",
+        "coco-000000092974",
+        "coco-000000144179",
+        "fashionpedia-9014",
+        "fashionpedia-15758",
+        "controlled-modern-office-business",
+        "controlled-red-tie-white-shirt",
+        "coco-000000323288",
+        "fashionpedia-9636",
+        "coco-000000470976"
+      ],
+      "relevant_ranks": [
+        1,
+        4,
+        5,
+        9
+      ]
+    },
+    {
+      "query_id": "beige-skirt",
+      "text": "A person wearing a beige skirt.",
+      "category": "attribute",
+      "relevant_count": 12,
+      "top_10": [
+        "fashionpedia-18250",
+        "fashionpedia-18406",
+        "fashionpedia-19506",
+        "fashionpedia-11217",
+        "fashionpedia-16320",
+        "fashionpedia-9873",
+        "fashionpedia-9541",
+        "fashionpedia-15866",
+        "fashionpedia-17848",
+        "fashionpedia-18376"
+      ],
+      "relevant_ranks": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "query_id": "black-cardigan",
+      "text": "A person wearing a black cardigan.",
+      "category": "attribute",
+      "relevant_count": 4,
+      "top_10": [
+        "fashionpedia-11381",
+        "fashionpedia-9690",
+        "fashionpedia-16537",
+        "fashionpedia-11393",
+        "fashionpedia-12279",
+        "coco-000000453195",
+        "fashionpedia-12174",
+        "coco-000000091263",
+        "fashionpedia-17869",
+        "fashionpedia-17958"
+      ],
+      "relevant_ranks": [
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    {
+      "query_id": "purple-dress",
+      "text": "A person wearing a purple dress.",
+      "category": "attribute",
+      "relevant_count": 5,
+      "top_10": [
+        "fashionpedia-12729",
+        "fashionpedia-15331",
+        "fashionpedia-11264",
+        "fashionpedia-15953",
+        "fashionpedia-9363",
+        "fashionpedia-12726",
+        "fashionpedia-17515",
+        "fashionpedia-15236",
+        "fashionpedia-19661",
+        "fashionpedia-9703"
+      ],
+      "relevant_ranks": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "query_id": "yellow-shoes",
+      "text": "A person wearing yellow shoes.",
+      "category": "attribute",
+      "relevant_count": 3,
+      "top_10": [
+        "coco-000000158737",
+        "fashionpedia-10384",
+        "fashionpedia-13414",
+        "fashionpedia-12546",
+        "fashionpedia-16932",
+        "fashionpedia-20599",
+        "fashionpedia-17610",
+        "fashionpedia-12889",
+        "fashionpedia-9711",
+        "fashionpedia-16116"
+      ],
+      "relevant_ranks": [
+        2,
+        3,
+        4
+      ]
+    },
+    {
+      "query_id": "black-jacket-black-pants",
+      "text": "A person wearing a black jacket and black pants.",
+      "category": "compositional",
+      "relevant_count": 27,
+      "top_10": [
+        "fashionpedia-10184",
+        "fashionpedia-18043",
+        "fashionpedia-19262",
+        "fashionpedia-10912",
+        "fashionpedia-13395",
+        "fashionpedia-15515",
+        "fashionpedia-10118",
+        "fashionpedia-9481",
+        "fashionpedia-12798",
+        "fashionpedia-19051"
+      ],
+      "relevant_ranks": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "query_id": "gray-jacket-gray-tshirt",
+      "text": "A person wearing a gray jacket and a gray t-shirt.",
+      "category": "compositional",
+      "relevant_count": 15,
+      "top_10": [
+        "fashionpedia-9880",
+        "fashionpedia-9743",
+        "fashionpedia-11065",
+        "fashionpedia-17240",
+        "fashionpedia-16666",
+        "coco-000000301605",
+        "fashionpedia-12921",
+        "coco-000000186906",
+        "coco-000000304186",
+        "fashionpedia-12174"
+      ],
+      "relevant_ranks": [
+        5,
+        7
+      ]
+    },
+    {
+      "query_id": "black-pants-black-tshirt",
+      "text": "A person wearing black pants and a black t-shirt.",
+      "category": "compositional",
+      "relevant_count": 35,
+      "top_10": [
+        "fashionpedia-13395",
+        "fashionpedia-10912",
+        "fashionpedia-15515",
+        "fashionpedia-18374",
+        "fashionpedia-10512",
+        "fashionpedia-9699",
+        "fashionpedia-11791",
+        "coco-000000147054",
+        "fashionpedia-10531",
+        "fashionpedia-18712"
+      ],
+      "relevant_ranks": [
+        4,
+        10
+      ]
+    },
+    {
+      "query_id": "black-dress-black-tights",
+      "text": "A person wearing a black dress and black tights.",
+      "category": "compositional",
+      "relevant_count": 10,
+      "top_10": [
+        "fashionpedia-13598",
+        "fashionpedia-17048",
+        "fashionpedia-17869",
+        "fashionpedia-19661",
+        "fashionpedia-15870",
+        "fashionpedia-12360",
+        "fashionpedia-20159",
+        "fashionpedia-9703",
+        "fashionpedia-19616",
+        "fashionpedia-12726"
+      ],
+      "relevant_ranks": [
+        10
+      ]
+    },
+    {
+      "query_id": "black-coat-black-pants",
+      "text": "A person wearing a black coat and black pants.",
+      "category": "compositional",
+      "relevant_count": 10,
+      "top_10": [
+        "fashionpedia-12009",
+        "fashionpedia-18033",
+        "fashionpedia-18212",
+        "fashionpedia-20144",
+        "fashionpedia-15255",
+        "fashionpedia-16673",
+        "fashionpedia-9566",
+        "fashionpedia-17737",
+        "fashionpedia-14522",
+        "fashionpedia-18159"
+      ],
+      "relevant_ranks": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
+      ]
+    },
+    {
+      "query_id": "black-skirt-black-tshirt",
+      "text": "A person wearing a black skirt and a black t-shirt.",
+      "category": "compositional",
+      "relevant_count": 12,
+      "top_10": [
+        "fashionpedia-20499",
+        "fashionpedia-15604",
+        "fashionpedia-13283",
+        "fashionpedia-11298",
+        "fashionpedia-17085",
+        "fashionpedia-14452",
+        "fashionpedia-20065",
+        "fashionpedia-19394",
+        "fashionpedia-13505",
+        "fashionpedia-12128"
+      ],
+      "relevant_ranks": [
+        3,
+        6,
+        7,
+        8
+      ]
+    },
+    {
+      "query_id": "gray-pants-gray-tshirt",
+      "text": "A person wearing gray pants and a gray t-shirt.",
+      "category": "compositional",
+      "relevant_count": 12,
+      "top_10": [
+        "fashionpedia-16186",
+        "coco-000000201111",
+        "coco-000000340220",
+        "fashionpedia-10011",
+        "coco-000000202990",
+        "coco-000000531784",
+        "fashionpedia-11791",
+        "coco-000000253125",
+        "fashionpedia-13560",
+        "fashionpedia-10531"
+      ],
+      "relevant_ranks": []
+    },
+    {
+      "query_id": "black-bag-black-coat",
+      "text": "A person carrying a black bag and wearing a black coat.",
+      "category": "compositional",
+      "relevant_count": 11,
+      "top_10": [
+        "fashionpedia-9548",
+        "fashionpedia-17958",
+        "coco-000000371114",
+        "fashionpedia-16673",
+        "coco-000000345172",
+        "fashionpedia-15255",
+        "fashionpedia-9753",
+        "fashionpedia-15593",
+        "fashionpedia-9658",
+        "fashionpedia-17448"
+      ],
+      "relevant_ranks": [
+        1,
+        2,
+        4,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "query_id": "black-shirt-black-pants",
+      "text": "A person wearing a black shirt and black pants.",
+      "category": "compositional",
+      "relevant_count": 11,
+      "top_10": [
+        "fashionpedia-13395",
+        "fashionpedia-10912",
+        "fashionpedia-12257",
+        "fashionpedia-15515",
+        "fashionpedia-19794",
+        "fashionpedia-18374",
+        "fashionpedia-11791",
+        "fashionpedia-9699",
+        "fashionpedia-10512",
+        "fashionpedia-11895"
+      ],
+      "relevant_ranks": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "query_id": "white-tshirt-beige-shoes",
+      "text": "A person wearing a white t-shirt and beige shoes.",
+      "category": "compositional",
+      "relevant_count": 13,
+      "top_10": [
+        "fashionpedia-15758",
+        "fashionpedia-11217",
+        "fashionpedia-16219",
+        "fashionpedia-15108",
+        "fashionpedia-9664",
+        "fashionpedia-9151",
+        "coco-000000323288",
+        "fashionpedia-10395",
+        "fashionpedia-15743",
+        "fashionpedia-11508"
+      ],
+      "relevant_ranks": [
+        5,
+        6
+      ]
+    }
+  ]
+}

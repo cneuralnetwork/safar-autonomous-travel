@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f2eee4" />
+    <meta name="description" content="Glance is an evidence-aware fashion and context image retrieval lab." />
+    <title>Glance — Fashion Retrieval Lab</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="grain" aria-hidden="true"></div>
+    <main class="shell">
+      <header class="masthead reveal">
+        <a class="wordmark" href="/" aria-label="Glance home">GLANCE<span>°</span></a>
+        <nav aria-label="Primary navigation">
+          <a href="#method">Method</a>
+          <a href="#results">Archive</a>
+          <a href="https://github.com/cneuralnetwork/glance-multimodal-fashion-retrieval" target="_blank" rel="noreferrer">Code ↗</a>
+        </nav>
+        <div id="runtime-pill" class="runtime-pill is-checking" role="status">
+          <i aria-hidden="true"></i><span>Checking index</span>
+        </div>
+      </header>
+
+      <section class="hero reveal delay-1" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="kicker"><span></span> Multimodal fashion retrieval / locally measured</p>
+          <h1 id="hero-title">Search by the <br class="mobile-break" /><em>look.</em><br />Rank by the evidence.</h1>
+          <p class="intro">Describe the garment, color, setting, and mood. Glance searches the full frame, then checks localized clothing evidence before it decides.</p>
+        </div>
+        <aside class="metric-rail" aria-label="Measured system highlights">
+          <div><strong>1,000</strong><span>indexed looks</span></div>
+          <div><strong>3,517</strong><span>garment points</span></div>
+          <div><strong>.9451</strong><span>real-context nDCG@10</span></div>
+        </aside>
+      </section>
+
+      <section class="search-stage reveal delay-2" aria-label="Fashion image search">
+        <form id="search-form">
+          <div class="search-topline">
+            <label class="search-label" for="query"><span>01</span> Describe the frame you want</label>
+            <fieldset class="result-count" aria-label="Number of results">
+              <legend>Show</legend>
+              <label><input type="radio" name="k" value="4" /><span>04</span></label>
+              <label><input type="radio" name="k" value="8" checked /><span>08</span></label>
+              <label><input type="radio" name="k" value="12" /><span>12</span></label>
+            </fieldset>
+          </div>
+          <div class="query-row">
+            <input id="query" name="query" type="search" autocomplete="off" spellcheck="true" value="A red tie and a white shirt in a formal setting" aria-describedby="query-help" />
+            <button id="submit" type="submit"><span>Search archive</span><b aria-hidden="true">↗</b></button>
+          </div>
+          <p id="query-help" class="visually-hidden">Use a natural-language description including clothing, color, place, or style.</p>
+          <div class="filter-row">
+            <span class="filter-heading">Refine</span>
+            <div class="filter-group" role="group" aria-label="Scene filters">
+              <label><input type="checkbox" name="scene" value="office" /><span>office</span></label>
+              <label><input type="checkbox" name="scene" value="urban_street" /><span>city</span></label>
+              <label><input type="checkbox" name="scene" value="park" /><span>park</span></label>
+              <label><input type="checkbox" name="scene" value="home" /><span>home</span></label>
+            </div>
+            <div class="filter-divider" aria-hidden="true"></div>
+            <div class="filter-group" role="group" aria-label="Style filters">
+              <label><input type="checkbox" name="style" value="formal" /><span>formal</span></label>
+              <label><input type="checkbox" name="style" value="casual" /><span>casual</span></label>
+              <label><input type="checkbox" name="style" value="outerwear" /><span>outerwear</span></label>
+            </div>
+            <button id="clear-filters" class="clear-filters" type="button">Clear</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="prompt-strip reveal delay-3" aria-label="Assignment example queries">
+        <span class="prompt-label">Try the benchmark</span>
+        <div class="prompt-list">
+          <button type="button" data-query="A person in a bright yellow raincoat"><b>01</b> Yellow raincoat</button>
+          <button type="button" data-query="Professional business attire inside a modern office"><b>02</b> Modern office</button>
+          <button type="button" data-query="Someone wearing a blue shirt sitting on a park bench"><b>03</b> Blue shirt / park</button>
+          <button type="button" data-query="Casual weekend outfit for a city walk"><b>04</b> Weekend city walk</button>
+          <button type="button" data-query="A red tie and a white shirt in a formal setting"><b>05</b> Red tie / white shirt</button>
+        </div>
+      </section>
+
+      <section id="method" class="method-band reveal delay-3" aria-labelledby="method-title">
+        <div class="method-title-wrap">
+          <p class="section-index">How it reads a look</p>
+          <h2 id="method-title">One query.<br /><em>Four signals.</em></h2>
+        </div>
+        <ol class="method-grid">
+          <li><span>01</span><h3>Scene</h3><p>Generic CLIP keeps office, park, street, and home context in view.</p></li>
+          <li><span>02</span><h3>Fashion</h3><p>LoRA-adapted FashionCLIP represents the full outfit in a specialist space.</p></li>
+          <li><span>03</span><h3>Garments</h3><p>Localized crops bind each requested color to the correct clothing category.</p></li>
+          <li><span>04</span><h3>Verdict</h3><p>An AND-style reranker rewards evidence that satisfies the complete request.</p></li>
+        </ol>
+      </section>
+
+      <section id="results" class="results" aria-live="polite" aria-busy="false">
+        <div class="results-head">
+          <div>
+            <p class="section-index">Ranked archive</p>
+            <h2 id="result-title">Ready when you are.</h2>
+          </div>
+          <div class="run-summary">
+            <p id="latency">No query yet</p>
+            <p id="corpus-label">Awaiting index status</p>
+          </div>
+        </div>
+        <div id="intent" class="intent-row" aria-label="Parsed query intent">
+          <span class="intent-empty">Parsed attributes will appear here.</span>
+        </div>
+        <div id="status" class="status">Choose a benchmark prompt or write your own description.</div>
+        <div id="gallery" class="gallery"></div>
+      </section>
+
+      <footer>
+        <div><a class="footer-mark" href="/">GLANCE°</a><p>Evidence-aware fashion retrieval.</p></div>
+        <div class="footer-meta"><p>FashionCLIP + LoRA</p><p>Generic CLIP / Qdrant</p><p>Local-first / auditable</p></div>
+      </footer>
+    </main>
+
+    <template id="result-card-template">
+      <article class="result-card">
+        <button class="image-wrap" type="button" aria-label="Inspect result">
+          <img alt="" loading="lazy" />
+          <span class="rank"></span>
+          <span class="card-action">Inspect ↗</span>
+        </button>
+        <div class="result-meta">
+          <div class="result-heading"><h3></h3><p class="score"></p></div>
+          <p class="caption"></p>
+          <div class="tags"></div>
+          <details class="evidence">
+            <summary>Score evidence <span>+</span></summary>
+            <div class="score-grid"></div>
+          </details>
+        </div>
+      </article>
+    </template>
+
+    <dialog id="result-dialog" aria-labelledby="dialog-title">
+      <button class="dialog-close" type="button" aria-label="Close result inspector">×</button>
+      <div class="dialog-layout">
+        <div class="dialog-image"><img alt="" /></div>
+        <div class="dialog-copy">
+          <p class="section-index" id="dialog-rank"></p>
+          <h2 id="dialog-title"></h2>
+          <p id="dialog-caption" class="dialog-caption"></p>
+          <div id="dialog-tags" class="tags"></div>
+          <div class="dialog-rule"></div>
+          <p class="section-index">Why this ranked</p>
+          <div id="dialog-scores" class="dialog-scores"></div>
+        </div>
+      </div>
+    </dialog>
+
+    <noscript><p class="noscript">This interactive search demo needs JavaScript enabled.</p></noscript>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

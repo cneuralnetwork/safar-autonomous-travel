@@ -1,0 +1,48 @@
+{
+  "passed": true,
+  "checks": {
+    "total_is_expected": true,
+    "image_ids_are_unique": true,
+    "all_images_exist": true,
+    "fashionpedia_count_is_expected": true,
+    "context_count_is_expected": true,
+    "context_is_balanced": true,
+    "selected_real_context_pass_qa": true,
+    "selected_real_context_have_successful_model_provenance": true,
+    "selected_real_context_have_visible_people": true,
+    "training_and_validation_are_disjoint": true,
+    "all_recorded_crops_exist": true
+  },
+  "counts": {
+    "images": 1000,
+    "sources": {
+      "coco": 295,
+      "fashionpedia": 700,
+      "synthetic": 5
+    },
+    "context_scenes": {
+      "home": 75,
+      "office": 75,
+      "park": 75,
+      "urban_street": 75
+    },
+    "garments": 3535,
+    "recorded_crop_paths": 3517,
+    "real_context_qa_tiers": {
+      "native_vlm_agreement": 295
+    },
+    "real_context_annotation_statuses": {
+      "success": 295
+    },
+    "real_context_annotation_models": {
+      "clip-ensemble/generic-clip+fashionclip-lora@context-v1": 295
+    },
+    "training_validation_overlap": 0
+  },
+  "failures": {
+    "duplicate_image_ids": 0,
+    "missing_image_ids": [],
+    "missing_crop_paths": [],
+    "overlapping_fashionpedia_ids": []
+  }
+}

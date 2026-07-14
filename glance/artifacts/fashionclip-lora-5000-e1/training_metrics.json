@@ -1,0 +1,9 @@
+{
+  "train_loss": 0.4477131354689598,
+  "chunk_loss": 0.2299528568983078,
+  "chunk_steps": 4,
+  "completed_batches": 625,
+  "total_batches": 625,
+  "pairs": 5000,
+  "complete": true
+}

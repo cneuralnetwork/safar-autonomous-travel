@@ -1,0 +1,198 @@
+\documentclass[11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{microtype}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\geometry{margin=0.78in}
+\definecolor{ink}{HTML}{1B1D21}
+\definecolor{paper}{HTML}{F4F0E7}
+\definecolor{acid}{HTML}{D7FF35}
+\definecolor{coral}{HTML}{D95543}
+\definecolor{soft}{HTML}{E9E4D9}
+\hypersetup{colorlinks=true,urlcolor=coral,linkcolor=ink,pdftitle={Glance Multimodal Fashion and Context Retrieval}}
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small\textsc{Glance / ML Internship Assignment}}
+\rhead{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancypagestyle{plain}{%
+  \fancyhf{}%
+  \lhead{\small\textsc{Glance / ML Internship Assignment}}%
+  \rhead{\small\thepage}%
+  \renewcommand{\headrulewidth}{0.4pt}%
+}
+\titleformat{\section}{\Large\bfseries\color{ink}}{\thesection}{0.7em}{}
+\titleformat{\subsection}{\large\bfseries\color{ink}}{\thesubsection}{0.6em}{}
+\setlist[itemize]{leftmargin=1.15em,itemsep=0.3em,topsep=0.35em}
+\setlength{\parskip}{0.45em}
+\setlength{\parindent}{0pt}
+\renewcommand{\arraystretch}{1.28}
+\newcommand{\pill}[1]{\fcolorbox{ink}{soft}{\strut\footnotesize\texttt{#1}}}
+
+\begin{document}
+
+\thispagestyle{empty}
+\colorbox{ink}{\parbox{0.96\linewidth}{\vspace{0.45in}\color{paper}\Huge\textbf{GLANCE}\\[0.12in]\LARGE Multimodal Fashion and Context Retrieval\\[0.18in]\normalsize An ML-first image search system for clothing, place, and style.\vspace{0.45in}}}
+
+\vspace{0.42in}
+\begin{tabularx}{\linewidth}{@{}>{\bfseries}l X@{}}
+Assignment & Glance ML Internship Assignment \\
+Deliverables & Indexer, retriever, FastAPI website, evaluation workflow, and this report \\
+Codebase & \href{https://github.com/cneuralnetwork/glance-multimodal-fashion-retrieval}{github.com/cneuralnetwork/glance-multimodal-fashion-retrieval} \\
+Core claim & Localized garment evidence and attribute-aware reranking solve failure modes of a single global CLIP embedding. \\
+\end{tabularx}
+
+\vfill
+\fcolorbox{coral}{acid}{\parbox{0.90\linewidth}{\textbf{Design principle.} A result should match the requested garment \emph{and} its color, not merely contain both concepts somewhere in the image.}}
+\vspace{0.2in}
+\newpage
+
+\section{Problem and success criteria}
+
+The task is text-to-image retrieval over diverse fashion photographs. A correct result must jointly understand (1) garment category and color, (2) setting and activity, and (3) style or occasion. The assembled searchable corpus is 1,000 images: 700 Fashionpedia examples for reliable localized apparel attributes, 295 Open Images examples selected from an over-complete pool of 504 unique local candidates, and five explicitly disclosed, training-excluded controlled visual probes. Every Open Images candidate has a native Person box covering at least 3\% of the frame. The 300 context slots remain balanced at 75 office, street, park, and home examples. A separate set of 5,000 official Fashionpedia training images is disjoint from the 700-image validation corpus used for the retrieval experiment.
+
+The system is evaluated against the five supplied prompts, including the difficult composition ``a red tie and a white shirt.'' Success means that the top results visibly satisfy all stated constraints, not merely that their filenames or captions overlap with query words.
+
+\section{Approaches considered}
+
+\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{0.22\linewidth}>{\raggedright\arraybackslash}p{0.25\linewidth}>{\raggedright\arraybackslash}X@{}}
+\toprule
+\textbf{Approach} & \textbf{Strength} & \textbf{Tradeoff and when to use it} \\
+\midrule
+Vanilla CLIP retrieval & Minimal code; strong zero-shot semantic baseline. & A single whole-image vector entangles garment, background, and pose. Use as a baseline or for broad visual search. \\
+Fashion CLIP only & Better apparel vocabulary and colors than generic CLIP. & Product-focused training can underweight real-world context. Use when the corpus is mostly catalog imagery. \\
+Caption then text search & Interpretable and cheap to query. & Captions may omit colors, relations, or small accessories. Use as an auxiliary metadata filter, never as the only visual signal. \\
+Full supervised detector/reranker & Highest potential precision. & Requires costly labeled data and a more complex serving stack. Use after query logs justify the annotation budget. \\
+\textbf{Glance: multi-vector late interaction} & Keeps generic scene semantics, fashion semantics, and localized garments separate. & More indexing work, but the logic is modular and scales through Qdrant. Chosen for this assignment. \\
+\bottomrule
+\end{tabularx}
+
+\section{Chosen architecture}
+
+\subsection{Indexing workflow}
+
+Fashionpedia provides instance masks, category labels, and fine-grained attributes. These are the highest-confidence garment records. Garment colors are read from native attributes when possible and otherwise inferred from the annotated region using a fixed twelve-color CIE Lab palette. For the context subset, Open Images supplies an over-complete candidate pool. A local quantized \texttt{gemma3:4b} VLM receives two views of every unique image: the full frame for place and activity plus the independently annotated Person crop for visible clothing. Its JSON schema constrains scenes, activities, styles, physical garment categories, colors, caption, and confidence. Duplicate garments are removed; whole-word venue rules reject contradictions such as \texttt{scene=home} with a restaurant caption. A record passes automated QA only after successful inference, a supported scene, a nonempty factual caption, and a physical garment. Native/VLM scene agreement forms the strongest selection tier. This evidence is explicitly called model-assisted QA, not human audit. Rendered contact sheets and an editable CSV support further review. Five inspected synthetic probes cover sparse official prompt combinations and are visibly tagged as such; they are excluded from LoRA training and real-image benchmark claims.
+
+\begin{center}
+\small
+\fcolorbox{ink}{paper}{\parbox{0.25\linewidth}{\centering Fashionpedia masks\\Open Images frame + Person box}}\quad
+$\longrightarrow$\quad
+\fcolorbox{ink}{soft}{\parbox{0.25\linewidth}{\centering Structured image record\\scene, style, activity, garments}}\quad
+$\longrightarrow$\quad
+\fcolorbox{ink}{acid}{\parbox{0.25\linewidth}{\centering Qdrant\\image vectors + garment crop vectors}}
+\end{center}
+
+Each image receives two named vectors:
+
+\begin{itemize}
+  \item a generic \pill{CLIP} vector for scene, activity, and broad visual semantics;
+  \item a \pill{Marqo FashionCLIP} vector for apparel semantics, with an optional LoRA adapter after local fine-tuning.
+\end{itemize}
+
+Each Fashionpedia garment crop receives an additional FashionCLIP vector. Open Images does not provide garment boxes, so the pipeline does not invent them: its native Person crop is stored with an explicit \texttt{native\_person} scope and supplies a coarser focused fashion vector for the VLM-labeled garments. The full frame still supplies the context vectors. Qdrant stores whole images and localized evidence in separate collections, with payload indexes for scene, style, garment category, garment color, and source. This is real vector search, not filename keyword matching.
+
+\subsection{Fashion adaptation workflow}
+
+The completed training run uses 5,000 official Fashionpedia train images disjoint from the retrieval validation set. Native annotations generate deterministic captions such as ``a person wearing a red tie and a white shirt.'' A rank-16 LoRA adapts the differentiable \texttt{c\_fc}/\texttt{c\_proj} transformer MLP projections in FashionCLIP's image and text towers, with contrastive image-text loss plus a margin loss against color-binding hard negatives. Its fused attention projections remain frozen because the public Marqo wrapper exposes them under inference mode; using the underlying local OpenCLIP checkpoint avoids a silently non-differentiable fine-tuning path. For example, the negative caption swaps the two colors while keeping the nouns: ``a white tie and a red shirt.'' One epoch completed all 625 batches (batch size 8, gradient accumulation 4, seed 19) with mean training loss 0.4477. The saved PEFT adapter and base-model manifest were then loaded for both validation and final-corpus reindexing.
+
+\subsection{Retrieval workflow}
+
+The query parser extracts a structured intent:
+
+\begin{center}
+\pill{scene} \quad \pill{activity} \quad \pill{style} \quad \pill{garments = [(color, category), ...]}
+\end{center}
+
+The system runs a generic whole-image search, a fashion whole-image search, and one garment-crop search per requested garment. Reciprocal-rank fusion makes the candidate set robust to any one embedding space. A final reranker uses:
+
+\[
+S = 0.30S_{generic} + 0.25S_{fashion} + 0.30\min_i(S_{garment,i}) + 0.15S_{metadata}
+\]
+
+The minimum across garment requirements encodes an AND relationship. A candidate with a perfect white shirt but a blue tie receives a low garment score for the red-tie, white-shirt request. The API returns the parsed intent, matched attributes, and the four score components so a reviewer can inspect why a result ranked highly.
+
+\section{Experimental protocol and measured results}
+
+The real-image experiment is closed-world retrieval over 700 Fashionpedia validation images. Its 22 frozen queries contain 12 single-attribute requests and 10 multi-garment compositions. Relevance sets are complete within this corpus: garment categories come from official Fashionpedia annotations, while colors are deterministically derived from annotated garment regions using the fixed palette. The 5,000-image LoRA training set has zero image-ID overlap with this validation set. The same qrels and candidate corpus evaluate generic CLIP, FashionCLIP-only, and the full attribute-aware system before and after adaptation. Hit@k (H@k) is the fraction of queries with at least one relevant result in the first $k$; Recall@k (R@k) is the fraction of all annotated relevant images recovered.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+\textbf{System} & \textbf{H@1} & \textbf{H@5} & \textbf{H@10} & \textbf{R@10} & \textbf{nDCG@10} \\
+\midrule
+Vanilla CLIP & 27.27\% & 54.55\% & 72.73\% & 13.26\% & 0.2482 \\
+Base FashionCLIP only & 63.64\% & 72.73\% & 81.82\% & 17.88\% & 0.3741 \\
+Base attribute-aware & 68.18\% & 72.73\% & 86.36\% & 47.25\% & 0.6875 \\
+LoRA FashionCLIP only & 45.45\% & 86.36\% & 90.91\% & 24.26\% & 0.4315 \\
+\textbf{LoRA attribute-aware} & \textbf{68.18\%} & \textbf{81.82\%} & \textbf{95.45\%} & \textbf{52.07\%} & \textbf{0.7315} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The adapted full system improves H@5 by 9.09 percentage points, H@10 by 9.09 points, true R@10 by 4.82 points, and nDCG@10 by 0.0440 over the same architecture with base FashionCLIP, while holding H@1 constant. Against vanilla CLIP it improves nDCG@10 from 0.2482 to 0.7315. FashionCLIP-only H@1 regresses after the single training epoch even as its deeper recall and nDCG improve; this is evidence that the small adaptation shifts the first rank and should not be presented as a universal win.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+\textbf{Compositional subset} & \textbf{H@1} & \textbf{H@5} & \textbf{H@10} & \textbf{R@10} & \textbf{nDCG@10} \\
+\midrule
+Base attribute-aware & 40.00\% & 50.00\% & 80.00\% & 36.09\% & 0.4461 \\
+\textbf{LoRA attribute-aware} & \textbf{40.00\%} & \textbf{70.00\%} & \textbf{100.00\%} & \textbf{41.69\%} & \textbf{0.5093} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The post-LoRA validation index contains 700 whole-image points and 3,047 usable garment crops (18 invalid crops skipped). It was built and evaluated on an NVIDIA RTX 4060 Laptop GPU. The final demo index contains all 1,000 images and 3,066 usable crops. On the five supplied prompts, the full system retrieves each explicitly disclosed controlled probe at rank 1. Vanilla CLIP also passes that synthetic set, so the 5/5 result is only an operational acceptance check; it is not an independent context benchmark or evidence of model superiority.
+
+\section{Scalability and limitations}
+
+At one million images, the retrieval logic stays the same. Qdrant provides HNSW search with payload indexes, disk-backed vectors, scalar quantization, and batch ingestion. The service retrieves 200 candidates from each vector space and reranks only that small union locally. This keeps latency bounded without rewriting a vector database.
+
+Known limitations are important:
+
+\begin{itemize}
+  \item VLM-generated context labels can be wrong or overly confident. The two-view input, native-label agreement tier, contradiction checks, and contact-sheet review reduce this risk but do not replace independent human judgments.
+  \item Palette colors intentionally collapse shades such as navy into blue. This is appropriate for the assignment but should become a finer learned color taxonomy for retail use.
+  \item FashionCLIP is strongest for garments, not human pose or relations. The generic image branch protects contextual recall; a future cross-encoder can improve final precision.
+  \item The 22-query native-label benchmark measures fashion attributes and composition. A separate real-context suite measures selected Open Images metadata exhaustively, but those qrels are model-assisted rather than independently human-annotated.
+  \item Color relevance is palette-derived rather than human-judged, and the small query suite has no confidence intervals. The FashionCLIP-only H@1 regression also argues for early stopping on a larger validation set.
+  \item The provided corpus is deliberately small. It demonstrates the architecture, not a claim of web-scale fashion coverage.
+\end{itemize}
+
+\section{Future work}
+
+\textbf{Cities and places.} Add geotag, place-name, and visual place embeddings as a third context vector. Store city, landmark, indoor/outdoor, and neighborhood payloads with confidence and timestamp; query them with the same late-interaction pattern rather than forcing them into apparel embedding space.
+
+\textbf{Weather.} Enrich each record with weather state, temperature band, season, and visible evidence such as umbrella or wet pavement. A weather-aware query can then boost compatible outerwear while retaining visual verification.
+
+\textbf{Precision.} Add an image-text cross-encoder over the top 50 candidates, train from reviewer accept/reject feedback, mine difficult color/category swaps from query logs, and replace VLM boxes with a fashion segmentation model for non-Fashionpedia sources.
+
+\section{Reproducibility}
+
+The codebase exposes separate commands for curation, resumable downloading, person-box filtering, contact-sheet rendering, annotation, audit application, controlled-probe construction, LoRA training, indexing, evaluation, and serving. It uses local open-source models and Qdrant rather than paid APIs. The LoRA command emits portable PEFT weights, resumable optimizer state, training metrics, and a base-model manifest; setting the adapter path and rebuilding the index activates it. Baseline and adapted metrics are saved under \texttt{artifacts/evaluation}. The README documents the exact command sequence; downloaded/generated image assets, embeddings, base-model weights, optimizer state, and database files are excluded from Git while the PEFT adapter, manifests, prompts, qrels, and configuration are versioned.
+
+\section{References}
+{\small
+\begin{enumerate}[leftmargin=1.4em,itemsep=0.15em,topsep=0.2em,parsep=0pt]
+  \item Fashionpedia project and download page: \url{https://fashionpedia.github.io/home/Fashionpedia_download.html}
+  \item Fashionpedia dataset paper: \url{https://arxiv.org/abs/2004.12276}
+  \item Open Images V7 download and annotation documentation: \url{https://storage.googleapis.com/openimages/web/download_v7.html}
+  \item Marqo FashionCLIP model card: \url{https://huggingface.co/Marqo/marqo-fashionCLIP}
+  \item Qdrant filtering and collection documentation: \href{https://qdrant.tech/documentation/search/filtering/}{qdrant.tech docs: filtering}
+\end{enumerate}
+}
+
+\end{document}

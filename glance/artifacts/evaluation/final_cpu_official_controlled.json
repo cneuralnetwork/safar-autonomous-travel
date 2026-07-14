@@ -1,0 +1,258 @@
+{
+  "query_count": 5,
+  "overall": {
+    "vanilla_clip": {
+      "hit_rate_at_1": 0.8,
+      "hit_rate_at_5": 1.0,
+      "hit_rate_at_10": 1.0,
+      "recall_at_1": 0.7,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 0.9101301085439291
+    },
+    "fashionclip_only": {
+      "hit_rate_at_1": 0.2,
+      "hit_rate_at_5": 0.8,
+      "hit_rate_at_10": 0.8,
+      "recall_at_1": 0.2,
+      "recall_at_5": 0.8,
+      "recall_at_10": 0.8,
+      "ndcg_at_10": 0.5425054482903966
+    },
+    "attribute_aware": {
+      "hit_rate_at_1": 1.0,
+      "hit_rate_at_5": 1.0,
+      "hit_rate_at_10": 1.0,
+      "recall_at_1": 0.9,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 0.9839441578296375
+    }
+  },
+  "by_category": {
+    "attribute": {
+      "vanilla_clip": {
+        "hit_rate_at_1": 0.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 0.0,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.6309297535714575
+      },
+      "fashionclip_only": {
+        "hit_rate_at_1": 0.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 0.0,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.6309297535714575
+      },
+      "attribute_aware": {
+        "hit_rate_at_1": 1.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 1.0,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0
+      }
+    },
+    "compositional": {
+      "vanilla_clip": {
+        "hit_rate_at_1": 1.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 1.0,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0
+      },
+      "fashionclip_only": {
+        "hit_rate_at_1": 0.5,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 0.5,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.7153382790366966
+      },
+      "attribute_aware": {
+        "hit_rate_at_1": 1.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 1.0,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0
+      }
+    },
+    "context": {
+      "vanilla_clip": {
+        "hit_rate_at_1": 1.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 0.5,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.9197207891481876
+      },
+      "fashionclip_only": {
+        "hit_rate_at_1": 0.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 0.0,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.6509209298071326
+      },
+      "attribute_aware": {
+        "hit_rate_at_1": 1.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 0.5,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.9197207891481876
+      }
+    },
+    "style": {
+      "vanilla_clip": {
+        "hit_rate_at_1": 1.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 1.0,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0
+      },
+      "fashionclip_only": {
+        "hit_rate_at_1": 0.0,
+        "hit_rate_at_5": 0.0,
+        "hit_rate_at_10": 0.0,
+        "recall_at_1": 0.0,
+        "recall_at_5": 0.0,
+        "recall_at_10": 0.0,
+        "ndcg_at_10": 0.0
+      },
+      "attribute_aware": {
+        "hit_rate_at_1": 1.0,
+        "hit_rate_at_5": 1.0,
+        "hit_rate_at_10": 1.0,
+        "recall_at_1": 1.0,
+        "recall_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0
+      }
+    }
+  },
+  "attribute_aware_rankings": [
+    {
+      "query_id": "official-yellow-raincoat",
+      "text": "A person in a bright yellow raincoat.",
+      "category": "attribute",
+      "relevant_count": 1,
+      "top_10": [
+        "controlled-yellow-raincoat",
+        "fashionpedia-12889",
+        "fashionpedia-16116",
+        "fashionpedia-18190",
+        "coco-000000037124",
+        "fashionpedia-19436",
+        "fashionpedia-12567",
+        "fashionpedia-10959",
+        "coco-000000053335",
+        "fashionpedia-13326"
+      ],
+      "relevant_ranks": [
+        1
+      ]
+    },
+    {
+      "query_id": "official-office-formal",
+      "text": "Professional business attire inside a modern office.",
+      "category": "context",
+      "relevant_count": 2,
+      "top_10": [
+        "controlled-red-tie-white-shirt",
+        "coco-000000545226",
+        "controlled-modern-office-business",
+        "coco-000000098922",
+        "coco-000000288872",
+        "coco-000000035827",
+        "coco-000000247421",
+        "coco-000000200680",
+        "coco-000000453195",
+        "coco-000000017877"
+      ],
+      "relevant_ranks": [
+        1,
+        3
+      ]
+    },
+    {
+      "query_id": "official-blue-shirt-park",
+      "text": "Someone wearing a blue shirt sitting on a park bench.",
+      "category": "compositional",
+      "relevant_count": 1,
+      "top_10": [
+        "controlled-blue-shirt-park-bench",
+        "coco-000000246066",
+        "coco-000000489248",
+        "fashionpedia-9895",
+        "coco-000000160607",
+        "fashionpedia-11791",
+        "coco-000000323288",
+        "fashionpedia-12251",
+        "coco-000000288872",
+        "coco-000000098922"
+      ],
+      "relevant_ranks": [
+        1
+      ]
+    },
+    {
+      "query_id": "official-city-weekend",
+      "text": "Casual weekend outfit for a city walk.",
+      "category": "style",
+      "relevant_count": 1,
+      "top_10": [
+        "controlled-casual-city-walk",
+        "coco-000000164572",
+        "coco-000000382715",
+        "coco-000000219558",
+        "coco-000000463467",
+        "coco-000000060387",
+        "fashionpedia-10544",
+        "fashionpedia-11696",
+        "fashionpedia-9481",
+        "fashionpedia-18943"
+      ],
+      "relevant_ranks": [
+        1
+      ]
+    },
+    {
+      "query_id": "official-red-tie-white-shirt",
+      "text": "A red tie and a white shirt in a formal setting.",
+      "category": "compositional",
+      "relevant_count": 1,
+      "top_10": [
+        "controlled-red-tie-white-shirt",
+        "coco-000000288872",
+        "coco-000000267661",
+        "coco-000000470976",
+        "coco-000000092974",
+        "coco-000000098922",
+        "coco-000000017877",
+        "fashionpedia-19326",
+        "coco-000000553443",
+        "fashionpedia-19760"
+      ],
+      "relevant_ranks": [
+        1
+      ]
+    }
+  ]
+}

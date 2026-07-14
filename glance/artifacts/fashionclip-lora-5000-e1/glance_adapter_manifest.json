@@ -1,0 +1,16 @@
+{
+  "base_model_dir": "models/marqo-fashionCLIP",
+  "architecture": "Marqo FashionCLIP / OpenCLIP ViT-B-16",
+  "target_modules": [
+    "c_fc",
+    "c_proj"
+  ],
+  "rank": 16,
+  "margin": 0.18,
+  "epochs": 1,
+  "batch_size": 8,
+  "gradient_accumulation": 4,
+  "seed": 19,
+  "completed_batches": 625,
+  "total_batches": 625
+}
