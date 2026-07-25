@@ -38,17 +38,9 @@ class CalendarService:
 
     async def status(self, user_id: str) -> dict[str, Any]:
         connection = await self.store.get_calendar_connection(user_id)
-        attempts = [
-            attempt
-            for attempt in self.attempts.values()
-            if attempt.user.id == user_id
-        ]
+        attempts = [attempt for attempt in self.attempts.values() if attempt.user.id == user_id]
         latest = max(attempts, key=lambda attempt: attempt.expires_at, default=None)
-        if (
-            latest
-            and latest.status == "pending"
-            and latest.expires_at < datetime.now(UTC)
-        ):
+        if latest and latest.status == "pending" and latest.expires_at < datetime.now(UTC):
             latest.status = "failed"
             latest.error = "Calendar connection expired. Please try again."
         return {
@@ -163,10 +155,7 @@ class CalendarService:
                     continue
                 event_id = self._event_id(user_id, run_id, item.id)
                 response = await self.client.put(
-                    (
-                        "https://www.googleapis.com/calendar/v3/calendars/"
-                        f"primary/events/{event_id}"
-                    ),
+                    (f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}"),
                     headers={
                         "Authorization": f"Bearer {access_token}",
                         "Content-Type": "application/json",
@@ -200,9 +189,7 @@ class CalendarService:
     def _event_id(user_id: str, run_id: str, item_id: str) -> str:
         # Google accepts base32hex characters for client-supplied event IDs.
         # A stable ID makes a partially failed approved batch safe to retry.
-        return hashlib.sha256(
-            f"safar:{user_id}:{run_id}:{item_id}".encode()
-        ).hexdigest()[:40]
+        return hashlib.sha256(f"safar:{user_id}:{run_id}:{item_id}".encode()).hexdigest()[:40]
 
     async def _valid_access_token(self, user_id: str, tokens: dict[str, Any]) -> str:
         expires_at = datetime.fromisoformat(tokens["expires_at"])

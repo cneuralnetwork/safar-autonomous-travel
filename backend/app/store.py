@@ -57,9 +57,7 @@ class Store(ABC):
     ) -> ChatMessage: ...
 
     @abstractmethod
-    async def update_message_run_id(
-        self, message_id: UUID, run_id: UUID, user_id: str
-    ) -> None: ...
+    async def update_message_run_id(self, message_id: UUID, run_id: UUID, user_id: str) -> None: ...
 
     @abstractmethod
     async def list_messages(self, conversation_id: UUID, user_id: str) -> list[ChatMessage]: ...
@@ -316,9 +314,7 @@ class SQLiteStore(Store):
             rows = cursor.fetchall()
         return [ChatMessage.model_validate_json(row[0]) for row in rows]
 
-    async def update_message_run_id(
-        self, message_id: UUID, run_id: UUID, user_id: str
-    ) -> None:
+    async def update_message_run_id(self, message_id: UUID, run_id: UUID, user_id: str) -> None:
         with self._connect() as db:
             cursor = db.execute(
                 "select payload from messages where id = ? and user_id = ?",
@@ -701,9 +697,7 @@ class SupabaseStore(Store):
         )
         return message
 
-    async def update_message_run_id(
-        self, message_id: UUID, run_id: UUID, user_id: str
-    ) -> None:
+    async def update_message_run_id(self, message_id: UUID, run_id: UUID, user_id: str) -> None:
         await self._request(
             "PATCH",
             "messages",

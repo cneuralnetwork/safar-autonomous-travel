@@ -1,14 +1,17 @@
 from datetime import date, timedelta
 
 import httpx
+import pytest
 
 from app.config import Settings
 from app.models import FlightSegment, TravelConstraints
 from app.travel_tools import (
+    NoResultsError,
     OpenStreetMapPlacesProvider,
     OpenStreetMapRoadProvider,
     RailRadarProvider,
     SerpApiProvider,
+    TravelToolRegistry,
 )
 
 
@@ -228,6 +231,42 @@ async def test_openstreetmap_places_are_real_named_coordinates() -> None:
     assert places[0].longitude == 73.9116
     assert places[0].maps_url == "https://www.openstreetmap.org/node/12345"
     assert places[1].maps_url == "https://www.openstreetmap.org/way/98765"
+
+
+async def test_demo_mode_never_fabricates_destination_places() -> None:
+    provider = OpenStreetMapPlacesProvider(Settings(app_env="test", travel_provider_mode="demo"))
+
+    places = await provider.search(TravelConstraints(destination="Goa"))
+    await provider.client.aclose()
+
+    assert places == []
+
+
+async def test_registry_does_not_invent_standalone_bus_schedules() -> None:
+    registry = TravelToolRegistry(
+        Settings(
+            app_env="test",
+            travel_provider_mode="demo",
+            railradar_api_key=None,
+        )
+    )
+
+    with pytest.raises(
+        NoResultsError,
+        match="live coach timetable provider is not configured",
+    ):
+        await registry.search_transport_journeys(
+            TravelConstraints(
+                origin="Kolkata",
+                destination="Goa",
+                start_date=date(2026, 7, 31),
+                end_date=date(2026, 8, 2),
+                adults=2,
+            ),
+            "outbound",
+            "bus",
+        )
+    await registry.close()
 
 
 async def test_railradar_returns_verified_train_schedule_with_estimated_fare() -> None:

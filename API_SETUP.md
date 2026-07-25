@@ -130,15 +130,14 @@ asks the traveller to verify inventory before booking.
 
 When no direct flight works, Safar searches RailRadar and can join a train to
 an OpenStreetMap/OSRM road connector for destinations without a practical
-railhead. Direct road alternatives use:
+railhead. First/last-mile connector routing uses:
 
 ```env
 OSRM_BASE_URL=https://router.project-osrm.org
 ```
 
-Road distance and duration come from the mapped route. Bus departure times and
-fares remain clearly labelled planning estimates unless a live coach inventory
-provider is added.
+Road distance and duration come from the mapped route. Safar does not present
+standalone bus schedules until a live coach inventory provider is connected.
 
 ## Required application secrets
 

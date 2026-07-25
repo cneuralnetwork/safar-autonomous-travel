@@ -26,23 +26,39 @@ export async function exportItineraryCalendar(
   }
 
   const FileSystem = await import('expo-file-system/legacy');
-  const Sharing = await import('expo-sharing');
+
+  if (Platform.OS === 'android') {
+    const initialDirectory =
+      FileSystem.StorageAccessFramework.getUriForDirectoryInRoot('Download');
+    const permission =
+      await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync(
+        initialDirectory,
+      );
+    if (!permission.granted) {
+      throw new Error(
+        'Choose a folder to save the calendar file. Nothing was shared.',
+      );
+    }
+    const displayName = filename.replace(/\.ics$/i, '');
+    const uri = await FileSystem.StorageAccessFramework.createFileAsync(
+      permission.directoryUri,
+      displayName,
+      'text/calendar',
+    );
+    await FileSystem.StorageAccessFramework.writeAsStringAsync(uri, contents, {
+      encoding: FileSystem.EncodingType.UTF8,
+    });
+    return filename;
+  }
+
   const directory = FileSystem.documentDirectory || FileSystem.cacheDirectory;
   if (!directory) {
     throw new Error('A writable folder is not available on this device.');
-  }
-  if (!(await Sharing.isAvailableAsync())) {
-    throw new Error('File sharing is not available on this device.');
   }
 
   const uri = `${directory}${filename}`;
   await FileSystem.writeAsStringAsync(uri, contents, {
     encoding: FileSystem.EncodingType.UTF8,
-  });
-  await Sharing.shareAsync(uri, {
-    mimeType: 'text/calendar',
-    dialogTitle: 'Open your Safar itinerary with a calendar app',
-    UTI: 'public.ics',
   });
   return filename;
 }

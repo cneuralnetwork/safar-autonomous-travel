@@ -79,9 +79,7 @@ async def test_google_callback_forwards_the_original_nonce_to_supabase() -> None
                     "sub": "google-subject",
                 },
             )
-        if request.url == httpx.URL(
-            "https://safar.supabase.co/auth/v1/token?grant_type=id_token"
-        ):
+        if request.url == httpx.URL("https://safar.supabase.co/auth/v1/token?grant_type=id_token"):
             payload = json.loads(request.content)
             assert payload == {
                 "provider": "google",

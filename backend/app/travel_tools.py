@@ -22,6 +22,7 @@ from app.models import (
     FlightSegment,
     HotelOption,
     PlaceOption,
+    TransportMode,
     TravelConstraints,
 )
 
@@ -750,16 +751,12 @@ class OpenStreetMapPlacesProvider:
     def __init__(self, settings: Settings) -> None:
         self.nominatim_base_url = settings.nominatim_base_url.rstrip("/")
         self.overpass_base_url = settings.overpass_base_url.rstrip("/")
-        self.use_demo = (
-            settings.app_env.lower() == "test"
-            or settings.travel_provider_mode == "demo"
-        )
+        self.offline_test = settings.app_env.lower() == "test"
         self.client = httpx.AsyncClient(
             timeout=35,
             headers={
                 "User-Agent": (
-                    "SafarTravelPlanner/1.0 "
-                    f"(travel itinerary service; {settings.public_base_url})"
+                    f"SafarTravelPlanner/1.0 (travel itinerary service; {settings.public_base_url})"
                 ),
                 "Accept-Language": "en",
             },
@@ -769,8 +766,8 @@ class OpenStreetMapPlacesProvider:
         self._nominatim_cache: dict[str, list[dict[str, Any]]] = {}
 
     async def search(self, constraints: TravelConstraints) -> list[PlaceOption]:
-        if self.use_demo:
-            return self._demo_places(constraints)
+        if self.offline_test:
+            return []
         if not constraints.destination:
             raise InvalidToolArguments("A destination is required for place search")
 
@@ -779,9 +776,7 @@ class OpenStreetMapPlacesProvider:
             limit=1,
         )
         if not destination:
-            raise NoResultsError(
-                f"OpenStreetMap could not locate {constraints.destination}"
-            )
+            raise NoResultsError(f"OpenStreetMap could not locate {constraints.destination}")
         bounding_box = destination[0].get("boundingbox") or []
         if len(bounding_box) != 4:
             raise NoResultsError(
@@ -805,9 +800,7 @@ out center tags 80;
             data={"data": query},
         )
         if response.status_code in {408, 429, 500, 502, 503, 504}:
-            raise TemporaryToolError(
-                f"OpenStreetMap Overpass returned {response.status_code}"
-            )
+            raise TemporaryToolError(f"OpenStreetMap Overpass returned {response.status_code}")
         response.raise_for_status()
         results: list[PlaceOption] = []
         seen_names: set[str] = set()
@@ -887,13 +880,10 @@ out center tags 80;
             or all(hotel.distance_to_preference_km is not None for hotel in hotels)
         ):
             return hotels
-        if self.use_demo:
+        if self.offline_test:
             return hotels
         locations = await self._nominatim_search(
-            (
-                f"{constraints.hotel_area_preference} in "
-                f"{constraints.destination}, India"
-            ),
+            (f"{constraints.hotel_area_preference} in {constraints.destination}, India"),
             limit=8,
         )
         reference_points = [
@@ -951,9 +941,7 @@ out center tags 80;
             finally:
                 self._last_nominatim_request = monotonic()
         if response.status_code in {408, 429, 500, 502, 503, 504}:
-            raise TemporaryToolError(
-                f"OpenStreetMap Nominatim returned {response.status_code}"
-            )
+            raise TemporaryToolError(f"OpenStreetMap Nominatim returned {response.status_code}")
         response.raise_for_status()
         results = response.json()
         if not isinstance(results, list):
@@ -976,32 +964,6 @@ out center tags 80;
         if category in {"marketplace", "viewpoint", "beach"}:
             return 90
         return 120
-
-    def _demo_places(self, constraints: TravelConstraints) -> list[PlaceOption]:
-        destination = constraints.destination or "Goa"
-        names = [
-            ("Sunrise beach walk", "beach"),
-            ("Old quarter heritage trail", "museum"),
-            ("Local market & food crawl", "market"),
-            ("Riverside sunset point", "viewpoint"),
-            ("Coastal fort", "historical_landmark"),
-            ("Neighbourhood café", "restaurant"),
-            ("Art and craft studio", "art_gallery"),
-            ("Nature reserve", "park"),
-        ]
-        return [
-            PlaceOption(
-                id=f"demo-place-{index + 1}",
-                name=name,
-                address=f"{destination}, India",
-                category=category,
-                rating=round(4.8 - index * 0.08, 1),
-                latitude=15.48 + index * 0.012,
-                longitude=73.76 + index * 0.009,
-                duration_minutes=90 if category == "restaurant" else 120,
-            )
-            for index, (name, category) in enumerate(names)
-        ]
 
 
 STATION_ALIASES: dict[str, list[str]] = {
@@ -1150,9 +1112,7 @@ class OpenStreetMapRoadProvider:
                 tzinfo=IST,
             )
             arrival_at = departure_at + timedelta(minutes=duration_minutes)
-            estimated_fare = math.ceil(
-                max(250, distance_km * 1.55 * fare_factor) * travellers
-            )
+            estimated_fare = math.ceil(max(250, distance_km * 1.55 * fare_factor) * travellers)
             segment = FlightSegment(
                 airline=service,
                 flight_number=None,
@@ -1294,14 +1254,10 @@ class RailRadarProvider:
             raise InvalidToolArguments("Cities and date are required for railway search")
         stations = await self._station_lookup()
         origin_candidates = (
-            constraints.destination_station_codes
-            if is_return
-            else constraints.origin_station_codes
+            constraints.destination_station_codes if is_return else constraints.origin_station_codes
         )
         destination_candidates = (
-            constraints.origin_station_codes
-            if is_return
-            else constraints.destination_station_codes
+            constraints.origin_station_codes if is_return else constraints.destination_station_codes
         )
         origin = self._resolve_endpoint(origin_city, stations, origin_candidates)
         destination = self._resolve_endpoint(
@@ -1361,9 +1317,7 @@ class RailRadarProvider:
         if not isinstance(stations, dict):
             raise ToolError("RailRadar returned an invalid station lookup")
         self._stations = {
-            str(code).upper(): str(name)
-            for code, name in stations.items()
-            if code and name
+            str(code).upper(): str(name) for code, name in stations.items() if code and name
         }
         return self._stations
 
@@ -1481,16 +1435,18 @@ class RailRadarProvider:
         while arrival_at <= departure_at:
             arrival_at += timedelta(days=1)
         duration = int(
-            item.get("duration")
-            or max(1, (arrival_at - departure_at).total_seconds() // 60)
+            item.get("duration") or max(1, (arrival_at - departure_at).total_seconds() // 60)
         )
         distance = float(item.get("distance") or 0)
         travellers = (constraints.adults or 1) + constraints.children
-        rail_fare = self._estimated_fare(
-            distance,
-            str(train.get("type") or ""),
-            number,
-        ) * travellers
+        rail_fare = (
+            self._estimated_fare(
+                distance,
+                str(train.get("type") or ""),
+                number,
+            )
+            * travellers
+        )
         segments: list[FlightSegment] = []
         connector_price = 0
         if origin.road_connector_required:
@@ -1571,15 +1527,11 @@ class RailRadarProvider:
     @staticmethod
     def _response_body(response: httpx.Response, operation: str) -> dict[str, Any]:
         if response.status_code in {408, 429, 500, 502, 503, 504}:
-            raise TemporaryToolError(
-                f"RailRadar {operation} returned {response.status_code}"
-            )
+            raise TemporaryToolError(f"RailRadar {operation} returned {response.status_code}")
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as error:
-            raise ToolError(
-                f"RailRadar {operation} failed: {response.status_code}"
-            ) from error
+            raise ToolError(f"RailRadar {operation} failed: {response.status_code}") from error
         body = response.json()
         if not body.get("success", True):
             error = body.get("error") or {}
@@ -1658,14 +1610,9 @@ class TravelToolRegistry:
                 results.extend(await self.rail.search_leg(constraints, leg))
             except (ToolError, httpx.HTTPError) as error:
                 errors.append(str(error))
-        try:
-            results.extend(await self.road.search_leg(constraints, leg))
-        except (ToolError, httpx.HTTPError) as error:
-            errors.append(str(error))
         if not results:
             raise NoResultsError(
-                "; ".join(errors)
-                or "No flight, railway, or road journey could be built safely"
+                "; ".join(errors) or "No verified flight or railway journey could be found"
             )
         results.sort(
             key=lambda option: (
@@ -1675,6 +1622,37 @@ class TravelToolRegistry:
             )
         )
         return results
+
+    async def search_transport_journeys(
+        self,
+        constraints: TravelConstraints,
+        leg: str,
+        mode: TransportMode,
+    ) -> list[FlightLegOption]:
+        if mode == "train":
+            if not self.rail:
+                raise NoResultsError(
+                    "RailRadar is not configured, so train schedules cannot be verified"
+                )
+            return await self.rail.search_leg(constraints, leg)
+        if mode == "bus":
+            raise NoResultsError(
+                "A live coach timetable provider is not configured; "
+                "OpenStreetMap routing alone is not a bus schedule"
+            )
+        if mode != "flight":
+            raise InvalidToolArguments(f"{mode} is not selectable for an entire leg")
+
+        method_name = "search_return_flights" if leg == "return" else "search_outbound_flights"
+        errors: list[str] = []
+        for provider in self.providers:
+            try:
+                results = await getattr(provider, method_name)(constraints)
+                if results:
+                    return sorted(results, key=lambda option: option.total_price)
+            except (ToolError, httpx.HTTPError) as error:
+                errors.append(f"{provider.name}: {error}")
+        raise NoResultsError("; ".join(errors) or "No verified flight options were returned")
 
     async def enrich_hotel_distances(
         self,
@@ -1709,29 +1687,18 @@ def combine_flight_legs(
             if (
                 outbound.route_type == "multimodal"
                 or inbound.route_type == "multimodal"
-                or len(
-                    {
-                        segment.mode
-                        for segment in [*outbound.segments, *inbound.segments]
-                    }
-                )
-                > 1
+                or len({segment.mode for segment in [*outbound.segments, *inbound.segments]}) > 1
             )
             else (
                 "connected"
-                if outbound.route_type == "connected"
-                or inbound.route_type == "connected"
+                if outbound.route_type == "connected" or inbound.route_type == "connected"
                 else "direct"
             )
         ),
         fare_is_estimate=outbound.fare_is_estimate or inbound.fare_is_estimate,
         schedule_is_live=outbound.schedule_is_live and inbound.schedule_is_live,
         source_note=" · ".join(
-            dict.fromkeys(
-                note
-                for note in (outbound.source_note, inbound.source_note)
-                if note
-            )
+            dict.fromkeys(note for note in (outbound.source_note, inbound.source_note) if note)
         )
         or None,
         intermediate_stops=outbound.intermediate_stops + inbound.intermediate_stops,

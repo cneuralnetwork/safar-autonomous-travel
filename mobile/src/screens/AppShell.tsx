@@ -10,6 +10,7 @@ import {
 import {
   ActivityIndicator,
   Keyboard,
+  KeyboardAvoidingView,
   Platform,
   Pressable,
   ScrollView,
@@ -104,6 +105,7 @@ export function AppShell() {
   const [error, setError] = useState<string | null>(null);
   const [composerText, setComposerText] = useState('');
   const [editingApproval, setEditingApproval] = useState(false);
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
   const composerRef = useRef<TextInput>(null);
   const eventCursorRef = useRef(0);
   const startingRequestRef = useRef(0);
@@ -181,6 +183,24 @@ export function AppShell() {
   useEffect(() => {
     void refreshConversations();
   }, [refreshConversations]);
+
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    const showEvent =
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent =
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSubscription = Keyboard.addListener(showEvent, () =>
+      setKeyboardVisible(true),
+    );
+    const hideSubscription = Keyboard.addListener(hideEvent, () =>
+      setKeyboardVisible(false),
+    );
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, []);
 
   useEffect(() => {
     if (!conversationId) {
@@ -295,6 +315,10 @@ export function AppShell() {
         }
         setComposerText(text);
         setStartingPrompt(null);
+        if (startingRequest !== null) {
+          setDraftChatOpen(true);
+          requestAnimationFrame(() => composerRef.current?.focus());
+        }
         setError(messageForError(sendError));
       } finally {
         if (
@@ -453,7 +477,9 @@ export function AppShell() {
   const darkStatusBar =
     tab === 'plan' && !snapshot && !startingPrompt && !draftChatOpen;
   const dockBottom = Math.max(10, insets.bottom + 2);
-  const chatComposerBottom = dockBottom + 88;
+  const chatComposerBottom = keyboardVisible
+    ? Math.max(8, insets.bottom)
+    : dockBottom + 88;
   const displayName =
     session?.user.user_metadata.full_name ||
     session?.user.user_metadata.name ||
@@ -466,7 +492,12 @@ export function AppShell() {
         edges={['top']}
       >
         <StatusBar style={darkStatusBar ? 'light' : 'dark'} />
-        <View style={styles.content}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          enabled={Platform.OS !== 'web'}
+          style={styles.keyboardAvoider}
+        >
+          <View style={styles.content}>
           {tab === 'plan' &&
           !snapshot &&
           !startingPrompt &&
@@ -572,10 +603,13 @@ export function AppShell() {
               signOut={signOut}
             />
           ) : null}
-        </View>
-        <View style={[styles.dockWrap, { bottom: dockBottom }]}>
-          <BottomDock active={tab} onChange={setTab} onCreate={openNewChat} />
-        </View>
+          </View>
+          {!keyboardVisible ? (
+            <View style={[styles.dockWrap, { bottom: dockBottom }]}>
+              <BottomDock active={tab} onChange={setTab} onCreate={openNewChat} />
+            </View>
+          ) : null}
+        </KeyboardAvoidingView>
       </SafeAreaView>
     </View>
   );
@@ -2129,6 +2163,7 @@ const styles = StyleSheet.create({
     }),
   },
   safeDark: { backgroundColor: colors.navy },
+  keyboardAvoider: { flex: 1 },
   content: { flex: 1, backgroundColor: colors.canvas },
   dockWrap: {
     position: 'absolute',

@@ -215,11 +215,7 @@ class FlightOption(BaseModel):
 
     @property
     def modes(self) -> list[TransportMode]:
-        return list(
-            dict.fromkeys(
-                segment.mode for segment in [*self.outbound, *self.inbound]
-            )
-        )
+        return list(dict.fromkeys(segment.mode for segment in [*self.outbound, *self.inbound]))
 
 
 class FlightLegOption(BaseModel):

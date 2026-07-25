@@ -14,13 +14,8 @@ from app.models import (
 
 
 def _journey_title(segments: list[FlightSegment]) -> str:
-    modes = " + ".join(
-        dict.fromkeys(segment.mode.title() for segment in segments)
-    )
-    return (
-        f"{modes} · {segments[0].departure_airport} → "
-        f"{segments[-1].arrival_airport}"
-    )
+    modes = " + ".join(dict.fromkeys(segment.mode.title() for segment in segments))
+    return f"{modes} · {segments[0].departure_airport} → {segments[-1].arrival_airport}"
 
 
 def _journey_description(segments: list[FlightSegment], *, returning: bool = False) -> str:

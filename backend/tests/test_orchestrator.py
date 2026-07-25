@@ -234,6 +234,29 @@ async def test_missing_traveller_count_is_asked_then_resolved_in_chat(
     assert resumed.graph is not None
 
 
+async def test_create_conversation_does_not_treat_people_as_budget(
+    tmp_path: Path,
+) -> None:
+    orchestrator, user = await build_orchestrator(tmp_path / "people-not-budget.db")
+
+    snapshot = await orchestrator.create_conversation(
+        user,
+        "Trip to Delhi from Kolkata for 3 people",
+        False,
+    )
+
+    assert snapshot.active_run is not None
+    assert snapshot.active_run.constraints.origin == "Kolkata"
+    assert snapshot.active_run.constraints.destination == "Delhi"
+    assert snapshot.active_run.constraints.adults == 3
+    assert snapshot.active_run.constraints.budget is None
+    assert snapshot.active_run.constraints.missing_fields == [
+        "start_date",
+        "end_date",
+    ]
+    assert snapshot.active_run.status == RunStatus.awaiting_input
+
+
 async def test_traveller_chooses_each_leg_and_can_change_it_in_chat(
     tmp_path: Path,
 ) -> None:
@@ -336,6 +359,95 @@ async def test_traveller_chooses_each_leg_and_can_change_it_in_chat(
     assert revised.approval.payload_hash != previous_hash
 
 
+async def test_take_the_train_selects_the_active_leg_without_restarting(
+    tmp_path: Path,
+) -> None:
+    orchestrator, user = await build_orchestrator(tmp_path / "train-choice.db")
+    snapshot = await orchestrator.create_conversation(
+        user,
+        ("plan a 3-day trip from Kolkata to Goa next weekend for two people under ₹60,000"),
+        False,
+    )
+    outbound_run = await wait_for_selection_stage(
+        orchestrator,
+        user,
+        snapshot.conversation.id,
+        "outbound_flight",
+    )
+    train = outbound_run.outbound_flights[1].model_copy(deep=True)
+    train.id = "railradar-outbound-18047-HWH-MAO"
+    train.provider = "railradar"
+    train.segments[0].mode = "train"
+    train.segments[0].airline = "Amaravati Express"
+    train.segments[0].service_name = "Amaravati Express"
+    train.segments[0].flight_number = "18047"
+    train.segments[0].departure_airport = "HWH"
+    train.segments[0].arrival_airport = "MAO"
+    outbound_run.outbound_flights.insert(1, train)
+    await orchestrator.store.save_run(outbound_run)
+
+    selected = await orchestrator.handle_message(
+        user,
+        snapshot.conversation.id,
+        SendMessageRequest(
+            text="take the train",
+            idempotency_key="active-leg-train-choice",
+        ),
+    )
+
+    assert selected.id == outbound_run.id
+    assert selected.selected_outbound_id == train.id
+    await wait_for_selection_stage(
+        orchestrator,
+        user,
+        snapshot.conversation.id,
+        "return_flight",
+    )
+
+
+async def test_transport_switch_refreshes_only_the_active_leg(
+    tmp_path: Path,
+) -> None:
+    orchestrator, user = await build_orchestrator(tmp_path / "train-refresh.db")
+    snapshot = await orchestrator.create_conversation(
+        user,
+        ("plan a 3-day trip from Kolkata to Goa next weekend for two people under ₹60,000"),
+        False,
+    )
+    outbound_run = await wait_for_selection_stage(
+        orchestrator,
+        user,
+        snapshot.conversation.id,
+        "outbound_flight",
+    )
+    trains = []
+    for index, original in enumerate(outbound_run.outbound_flights[:2], start=1):
+        train = original.model_copy(deep=True)
+        train.id = f"railradar-outbound-{index}"
+        train.provider = "railradar"
+        train.segments[0].mode = "train"
+        train.segments[0].airline = f"Verified train {index}"
+        train.segments[0].service_name = f"Verified train {index}"
+        train.segments[0].flight_number = f"1200{index}"
+        trains.append(train)
+    orchestrator.tools.search_transport_journeys = AsyncMock(return_value=trains)
+
+    refreshed = await orchestrator.handle_message(
+        user,
+        snapshot.conversation.id,
+        SendMessageRequest(
+            text="show me trains instead",
+            idempotency_key="active-leg-train-refresh",
+        ),
+    )
+
+    assert refreshed.id == outbound_run.id
+    assert refreshed.status == RunStatus.awaiting_input
+    assert refreshed.selection_stage == "outbound_flight"
+    assert [option.id for option in refreshed.outbound_flights] == [train.id for train in trains]
+    assert all("train" in option.modes for option in refreshed.outbound_flights)
+
+
 async def test_saved_preferences_require_confirmation_before_they_are_reused(
     tmp_path: Path,
 ) -> None:
@@ -388,9 +500,7 @@ async def test_saved_preferences_require_confirmation_before_they_are_reused(
     assert confirmed.constraints.adults is None
     assert confirmed.constraints.missing_fields == ["adults"]
     after_confirmation = await orchestrator.snapshot(user, second.conversation.id)
-    assert after_confirmation.messages[-1].text.startswith(
-        "How many people are travelling?"
-    )
+    assert after_confirmation.messages[-1].text.startswith("How many people are travelling?")
 
 
 async def test_declining_saved_preferences_keeps_them_out_of_the_trip(
@@ -605,8 +715,8 @@ async def test_sarvam_controls_interpretation_and_planning_with_durable_telemetr
                 budget=40_000,
                 adults=1,
             ),
-                explicit_fields=["origin", "destination", "budget", "adults"],
-                inferred_fields=["start_date", "end_date"],
+            explicit_fields=["origin", "destination", "budget", "adults"],
+            inferred_fields=["start_date", "end_date"],
             assumptions=["Using Friday through Sunday for next weekend."],
             assistant_message="I have the route, weekend, and budget.",
         ),

@@ -63,9 +63,7 @@ async def test_calendar_event_writes_are_idempotent_upserts(tmp_path) -> None:
     assert len(requests) == 2
     assert all(request.method == "PUT" for request in requests)
     assert requests[0].url == requests[1].url
-    assert requests[0].url.path.endswith(
-        CalendarService._event_id("user-1", "run-1", "item-1")
-    )
+    assert requests[0].url.path.endswith(CalendarService._event_id("user-1", "run-1", "item-1"))
 
 
 async def test_calendar_permission_denial_is_immediately_observable(tmp_path) -> None:

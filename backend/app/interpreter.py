@@ -143,9 +143,7 @@ def visual_theme_for_destination(destination: str | None) -> VisualTheme | None:
         return None
     for theme, destinations in VISUAL_THEME_DESTINATIONS.items():
         if any(
-            normalized == candidate
-            or candidate in normalized
-            or normalized in candidate
+            normalized == candidate or candidate in normalized or normalized in candidate
             for candidate in destinations
         ):
             return theme
@@ -241,21 +239,14 @@ class RequestInterpreter:
                     flags=re.IGNORECASE,
                 )
             ]
-        combined_assumptions = list(
-            dict.fromkeys([*assumptions, *model_assumptions])
-        )
-        quick_replies = (
-            result.value.quick_replies
-            if merged.missing_fields
-            else []
-        )
+        combined_assumptions = list(dict.fromkeys([*assumptions, *model_assumptions]))
+        quick_replies = result.value.quick_replies if merged.missing_fields else []
         if merged.missing_fields and not quick_replies:
             quick_replies = self._fallback_quick_replies(merged)
         return InterpretationOutcome(
             constraints=merged,
             assistant_message=(
-                result.value.assistant_message.strip()
-                or self._fallback_message(merged)
+                result.value.assistant_message.strip() or self._fallback_message(merged)
             ),
             quick_replies=quick_replies[:4],
             assumptions=combined_assumptions[:8],
@@ -278,11 +269,7 @@ class RequestInterpreter:
         if current:
             missing = set(current.missing_fields or current.required_missing())
             direct_place = next(
-                (
-                    place
-                    for place in sorted(AIRPORTS, key=len, reverse=True)
-                    if lower == place
-                ),
+                (place for place in sorted(AIRPORTS, key=len, reverse=True) if lower == place),
                 None,
             )
             if direct_place:
@@ -347,19 +334,19 @@ class RequestInterpreter:
         )
         if budget_increase:
             increment = int(budget_increase.group(1).replace(",", ""))
-            values["budget"] = int(values.get("budget") or 0) + increment
+            updated_budget = int(values.get("budget") or 0) + increment
+            if updated_budget >= 1000:
+                values["budget"] = updated_budget
         else:
-            budget_match = re.search(
-                r"(?:under|below|budget(?:\s+of|\s+to)?|within|for)"
-                r"\s*(?:₹|rs\.?|inr)?\s*([\d,]+)",
-                lower,
-            ) or re.search(r"(?:₹|rs\.?|inr)\s*([\d,]+)", lower)
-            if budget_match:
-                values["budget"] = int(budget_match.group(1).replace(",", ""))
+            extracted_budget = self._extract_budget(lower)
+            if extracted_budget is not None:
+                values["budget"] = extracted_budget
 
         duration_match = re.search(r"\b(\d+)\s*[- ]?\s*day", lower)
         if duration_match:
-            values["duration_days"] = int(duration_match.group(1))
+            duration_days = int(duration_match.group(1))
+            if 1 <= duration_days <= 30:
+                values["duration_days"] = duration_days
         else:
             for word, number in NUMBER_WORDS.items():
                 if re.search(rf"\b{word}\s*[- ]?\s*day", lower):
@@ -368,13 +355,15 @@ class RequestInterpreter:
 
         explicit_adults = re.search(r"\b(\d+)\s+adults?\b", lower)
         explicit_children = re.search(r"\b(\d+)\s+(?:children|child|kids?)\b", lower)
-        people_match = re.search(
-            r"\b(\d+)\s+(?:people|persons?|travellers?|travelers?)\b", lower
-        )
+        people_match = re.search(r"\b(\d+)\s+(?:people|persons?|travellers?|travelers?)\b", lower)
         if explicit_adults:
-            values["adults"] = int(explicit_adults.group(1))
+            adult_count = int(explicit_adults.group(1))
+            if 1 <= adult_count <= 9:
+                values["adults"] = adult_count
         elif people_match:
-            values["adults"] = int(people_match.group(1))
+            adult_count = int(people_match.group(1))
+            if 1 <= adult_count <= 9:
+                values["adults"] = adult_count
         else:
             for word, number in NUMBER_WORDS.items():
                 if re.search(
@@ -398,13 +387,13 @@ class RequestInterpreter:
             )
             if contextual_count:
                 raw_count = contextual_count.group(1)
-                values["adults"] = (
-                    int(raw_count)
-                    if raw_count.isdigit()
-                    else NUMBER_WORDS[raw_count]
-                )
+                adult_count = int(raw_count) if raw_count.isdigit() else NUMBER_WORDS[raw_count]
+                if 1 <= adult_count <= 9:
+                    values["adults"] = adult_count
         if explicit_children:
-            values["children"] = int(explicit_children.group(1))
+            child_count = int(explicit_children.group(1))
+            if 0 <= child_count <= 8:
+                values["children"] = child_count
         else:
             for word, number in NUMBER_WORDS.items():
                 if re.search(rf"\b{word}\s+(?:children|child|kids?)\b", lower):
@@ -430,13 +419,10 @@ class RequestInterpreter:
         elif "city centre" in lower or "city center" in lower:
             values["hotel_area_preference"] = "city centre"
             values["max_hotel_distance_km"] = values.get("max_hotel_distance_km") or 3.0
-        elif (
-            "hotel" in lower
-            and ("farther away" in lower or "further away" in lower)
-        ):
-            values["max_hotel_distance_km"] = float(
-                values.get("max_hotel_distance_km") or 3.0
-            ) + 2.0
+        elif "hotel" in lower and ("farther away" in lower or "further away" in lower):
+            values["max_hotel_distance_km"] = (
+                float(values.get("max_hotel_distance_km") or 3.0) + 2.0
+            )
 
         relative = self._relative_dates(lower, today, values.get("duration_days"))
         if relative:
@@ -492,12 +478,9 @@ class RequestInterpreter:
             values["destination_airport"] = AIRPORTS.get(str(values["destination"]).lower())
             if (
                 not previous_destination
-                or str(values["destination"]).casefold()
-                != previous_destination.casefold()
+                or str(values["destination"]).casefold() != previous_destination.casefold()
             ):
-                values["visual_theme"] = visual_theme_for_destination(
-                    str(values["destination"])
-                )
+                values["visual_theme"] = visual_theme_for_destination(str(values["destination"]))
         values["inferred_fields"] = inferred
         return self._finalize(TravelConstraints.model_validate(values))
 
@@ -525,15 +508,10 @@ class RequestInterpreter:
     def _finalize(self, constraints: TravelConstraints) -> TravelConstraints:
         # Airport identifiers are execution inputs, so only the controlled
         # registry may supply them. Model-suggested codes never bypass lookup.
-        constraints.origin_airport = AIRPORTS.get(
-            (constraints.origin or "").lower()
-        )
-        constraints.destination_airport = AIRPORTS.get(
-            (constraints.destination or "").lower()
-        )
-        constraints.visual_theme = (
-            constraints.visual_theme
-            or visual_theme_for_destination(constraints.destination)
+        constraints.origin_airport = AIRPORTS.get((constraints.origin or "").lower())
+        constraints.destination_airport = AIRPORTS.get((constraints.destination or "").lower())
+        constraints.visual_theme = constraints.visual_theme or visual_theme_for_destination(
+            constraints.destination
         )
         constraints.missing_fields = constraints.required_missing()
         return constraints
@@ -553,9 +531,7 @@ class RequestInterpreter:
         )
         patch = model.constraints.model_dump(mode="python", exclude_none=True)
         date_fields = {"start_date", "end_date"}
-        deterministic_dates_available = bool(
-            deterministic.start_date and deterministic.end_date
-        )
+        deterministic_dates_available = bool(deterministic.start_date and deterministic.end_date)
         for field, value in patch.items():
             if field in date_fields and not (
                 deterministic_dates_available
@@ -564,8 +540,7 @@ class RequestInterpreter:
             ):
                 continue
             if field == "adults" and not (
-                (current and current.adults is not None)
-                or self._contains_explicit_travellers(text)
+                (current and current.adults is not None) or self._contains_explicit_travellers(text)
             ):
                 continue
             if field == "children" and not self._contains_explicit_travellers(text):
@@ -636,6 +611,38 @@ class RequestInterpreter:
                 text.lower(),
             )
         )
+
+    @staticmethod
+    def _extract_budget(text: str) -> int | None:
+        amount = (
+            r"(?P<amount>\d[\d,]*(?:\.\d+)?)"
+            r"\s*(?P<scale>k|thousand|lakh|lac)?"
+        )
+        patterns = (
+            (
+                r"(?:^|\b)(?:under|below|up\s+to|"
+                r"within(?:\s+a)?(?:\s+budget)?(?:\s+of)?|"
+                r"budget(?:\s+(?:of|to|is))?)"
+                r"\s*[:=\-]?\s*(?:₹|rs\.?|inr)?\s*" + amount + r"\b"
+            ),
+            r"(?:₹|rs\.?|inr)\s*" + amount + r"\b",
+        )
+        match = next(
+            (candidate for pattern in patterns if (candidate := re.search(pattern, text))),
+            None,
+        )
+        if not match:
+            return None
+
+        numeric = float(match.group("amount").replace(",", ""))
+        multiplier = {
+            "k": 1_000,
+            "thousand": 1_000,
+            "lakh": 100_000,
+            "lac": 100_000,
+        }.get(match.group("scale") or "", 1)
+        budget = int(numeric * multiplier)
+        return budget if budget >= 1_000 else None
 
     @staticmethod
     def _fallback_message(constraints: TravelConstraints) -> str:

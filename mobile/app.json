@@ -10,13 +10,18 @@
     "icon": "./assets/generated/safar-app-icon.png",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "app.safar.travel"
+      "bundleIdentifier": "app.safar.travel",
+      "infoPlist": {
+        "LSSupportsOpeningDocumentsInPlace": true,
+        "UIFileSharingEnabled": true
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/generated/safar-app-icon.png",
         "backgroundColor": "#11184C"
       },
+      "softwareKeyboardLayoutMode": "resize",
       "package": "app.safar.travel"
     },
     "web": {
@@ -42,8 +47,7 @@
           "resizeMode": "contain",
           "backgroundColor": "#FAFAFD"
         }
-      ],
-      "expo-sharing"
+      ]
     ],
     "experiments": {
       "typedRoutes": true

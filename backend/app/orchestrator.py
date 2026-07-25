@@ -35,6 +35,7 @@ from app.models import (
     SendMessageRequest,
     TaskNode,
     TaskStatus,
+    TransportMode,
     TravelConstraints,
     TripSelectionRequest,
     UserIdentity,
@@ -202,6 +203,18 @@ class Orchestrator:
                     current_run.id,
                     TripSelectionRequest(kind=kind, option_id=option_id),
                 )
+            transport_request = self._transport_request_from_text(
+                current_run,
+                request.text,
+            )
+            if transport_request:
+                kind, mode = transport_request
+                return await self._handle_transport_request(
+                    user,
+                    current_run,
+                    kind,
+                    mode,
+                )
 
         memory_applied = False
         saved_preferences = await self.store.get_user_preferences(user.id)
@@ -217,9 +230,7 @@ class Orchestrator:
                 )
                 return current_run
             current_run.preference_confirmation_pending = False
-            current_run.saved_preferences_applied = bool(
-                preference_decision and saved_preferences
-            )
+            current_run.saved_preferences_applied = bool(preference_decision and saved_preferences)
             if preference_decision and saved_preferences:
                 base_constraints = self._apply_confirmed_preferences(
                     current_run.constraints,
@@ -241,8 +252,7 @@ class Orchestrator:
             base_constraints = base_constraints_override or (
                 current_run.constraints
                 if current_run
-                and current_run.status
-                in {RunStatus.awaiting_input, RunStatus.awaiting_approval}
+                and current_run.status in {RunStatus.awaiting_input, RunStatus.awaiting_approval}
                 else None
             )
             preference_confirmation_requested = bool(
@@ -508,9 +518,7 @@ class Orchestrator:
                     run.constraints,
                 )
                 if not run.outbound_flights:
-                    raise NoResultsError(
-                        "No outbound journey matches the requested departure time"
-                    )
+                    raise NoResultsError("No outbound journey matches the requested departure time")
                 await self.store.save_run(run)
                 await self._await_selection(run, "outbound_flight")
                 return False
@@ -530,9 +538,7 @@ class Orchestrator:
                     run.constraints,
                 )
                 if not run.return_flights:
-                    raise NoResultsError(
-                        "No return journey matches the requested departure time"
-                    )
+                    raise NoResultsError("No return journey matches the requested departure time")
                 await self.store.save_run(run)
                 await self._await_selection(run, "return_flight")
                 return False
@@ -1086,6 +1092,186 @@ class Orchestrator:
                 return kind, option.id
         return None
 
+    @staticmethod
+    def _transport_request_from_text(
+        run: RunState,
+        text: str,
+    ) -> tuple[SelectionKind | None, TransportMode] | None:
+        normalized = " ".join(text.lower().split())
+        directive = re.search(
+            (
+                r"\b(take|choose|pick|use|show|prefer|want|switch|change|travel|"
+                r"go|going|via|by)\b"
+            ),
+            normalized,
+        )
+        explicit_leg = re.search(
+            (
+                r"\b(trains?|rail|railway|flights?|planes?|bus(?:es)?|coaches)\s+"
+                r"(there|back|outbound|return|inbound)\b"
+            ),
+            normalized,
+        )
+        if not directive and not explicit_leg:
+            return None
+
+        mode: TransportMode | None = None
+        if re.search(r"\b(trains?|rail|railway)\b", normalized):
+            mode = "train"
+        elif re.search(r"\b(bus(?:es)?|coaches)\b", normalized):
+            mode = "bus"
+        elif re.search(r"\b(flights?|fly|planes?)\b", normalized):
+            mode = "flight"
+        if not mode:
+            return None
+
+        kind: SelectionKind | None = None
+        if re.search(
+            r"\b(return|inbound|back|coming back)\b",
+            normalized,
+        ):
+            kind = "return_flight"
+        elif re.search(
+            r"\b(outbound|departure|there|going there)\b",
+            normalized,
+        ):
+            kind = "outbound_flight"
+        elif run.selection_stage in {"outbound_flight", "return_flight"}:
+            kind = run.selection_stage
+        return kind, mode
+
+    async def _handle_transport_request(
+        self,
+        user: UserIdentity,
+        run: RunState,
+        kind: SelectionKind | None,
+        mode: TransportMode,
+    ) -> RunState:
+        if kind not in {"outbound_flight", "return_flight"}:
+            await self._message(
+                run,
+                MessageKind.clarification,
+                (
+                    f"Should I use {mode} for the journey there or the journey back? "
+                    "Your current plan is unchanged."
+                ),
+                {"quick_replies": [], "transport_mode": mode},
+            )
+            return run
+
+        options = [
+            option
+            for option in self._selection_options(run, kind)
+            if isinstance(option, FlightLegOption) and mode in option.modes
+        ]
+        if len(options) == 1:
+            return await self.select_option(
+                user,
+                run.id,
+                TripSelectionRequest(kind=kind, option_id=options[0].id),
+            )
+        if len(options) > 1:
+            if kind == "outbound_flight":
+                run.outbound_flights = options
+                run.selected_outbound_id = None
+            else:
+                run.return_flights = options
+                run.selected_return_id = None
+            self._invalidate_final_plan(run)
+            await self.store.save_run(run)
+            await self._await_selection(run, kind)
+            return run
+
+        leg = "return" if kind == "return_flight" else "outbound"
+        task_id = "return_flight_search" if kind == "return_flight" else "outbound_flight_search"
+        task = self._task(run, task_id)
+        task.status = TaskStatus.retrying
+        task.started_at = task.started_at or utc_now()
+        task.reason = f"Traveller requested {mode} for the active {leg} leg"
+        task.provider = self.tools.rail.name if mode == "train" and self.tools.rail else mode
+        run.status = RunStatus.running
+        run.phase = AgentPhase.executing
+        await self.store.save_task(run, task)
+        await self.store.save_run(run)
+        await self._event(
+            run,
+            event_type="transport_search_started",
+            status="running",
+            summary=f"Searching verified {mode} options for the {leg} leg.",
+            task_id=task_id,
+            payload={"leg": leg, "mode": mode},
+        )
+
+        try:
+            if mode == "train":
+                await self._resolve_rail_station_candidates(run)
+            run.provider_calls += 1
+            refreshed = await self.tools.search_transport_journeys(
+                run.constraints,
+                leg,
+                mode,
+            )
+            refreshed = self._filter_flight_options(refreshed, run.constraints)
+            if not refreshed:
+                raise NoResultsError(
+                    f"No verified {mode} option matches the requested departure time"
+                )
+        except (ToolError, httpx.HTTPError) as error:
+            reason = self._safe_external_error(error)
+            task.status = TaskStatus.completed
+            task.summary = f"No verified {mode} option was found"
+            task.reason = reason
+            task.completed_at = utc_now()
+            run.status = RunStatus.awaiting_input
+            run.phase = AgentPhase.awaiting_input
+            await self.store.save_task(run, task)
+            await self.store.save_run(run)
+            await self._message(
+                run,
+                MessageKind.clarification,
+                (
+                    f"I couldn’t find a verified {mode} schedule for this {leg} leg. "
+                    "I kept your current choices instead of restarting the trip."
+                ),
+                {
+                    "quick_replies": [],
+                    "transport_mode": mode,
+                    "leg": leg,
+                    "reason": reason,
+                },
+            )
+            return run
+
+        refreshed.sort(
+            key=lambda option: (
+                option.total_price,
+                option.departure_at,
+            )
+        )
+        if kind == "outbound_flight":
+            run.outbound_flights = refreshed
+            run.selected_outbound_id = None
+        else:
+            run.return_flights = refreshed
+            run.selected_return_id = None
+        self._invalidate_final_plan(run)
+        task.status = TaskStatus.completed
+        task.summary = f"Found {len(refreshed)} verified {mode} options"
+        task.reason = "The active leg was refreshed without restarting the trip"
+        task.completed_at = utc_now()
+        await self.store.save_task(run, task)
+        await self.store.save_run(run)
+        await self._event(
+            run,
+            event_type="transport_search_completed",
+            status="completed",
+            summary=f"Found {len(refreshed)} verified {mode} options.",
+            task_id=task_id,
+            payload={"leg": leg, "mode": mode, "option_count": len(refreshed)},
+        )
+        await self._await_selection(run, kind)
+        return run
+
     async def approve(
         self, user: UserIdentity, run_id: UUID, decision: ApprovalDecision
     ) -> RunState:
@@ -1205,14 +1391,22 @@ class Orchestrator:
             places = await self._retry_single(
                 run,
                 task,
-                "google_places",
+                "openstreetmap",
                 lambda: self.tools.places.search(run.constraints),
             )
             await self._complete_task(
                 run,
                 task,
-                f"Found {len(places)} itinerary candidates",
-                "Selected well-rated activities with usable location data",
+                (
+                    f"Found {len(places)} verified itinerary places"
+                    if places
+                    else "No verified places were added in this environment"
+                ),
+                (
+                    "Every activity has a named OpenStreetMap feature and coordinates"
+                    if places
+                    else "Safar leaves itinerary time flexible instead of inventing places"
+                ),
             )
             return places
         except (ToolError, httpx.HTTPError) as error:
@@ -1252,11 +1446,7 @@ class Orchestrator:
         has_airport_pair = bool(
             run.constraints.origin_airport and run.constraints.destination_airport
         )
-        search_providers = (
-            self.tools.providers
-            if not journey_task or has_airport_pair
-            else []
-        )
+        search_providers = self.tools.providers if not journey_task or has_airport_pair else []
         if journey_task and not has_airport_pair:
             errors.append("No complete airport pair exists for the requested cities")
         for provider_index, provider in enumerate(search_providers):
@@ -1343,22 +1533,23 @@ class Orchestrator:
             await self._resolve_rail_station_candidates(run)
             task.status = TaskStatus.retrying
             task.provider = (
-                "railradar+openstreetmap-road"
-                if self.tools.rail
-                else "openstreetmap-road"
+                "railradar+openstreetmap-connectors" if self.tools.rail else "verified-alternatives"
             )
             task.reason = (
                 "No usable direct flight was found; decomposing the route into "
-                "railway and road legs"
+                "verified railway legs and mapped first/last-mile connectors"
             )
             await self.store.save_task(run, task)
             await self._operation(
                 run,
                 task,
-                "No direct flight worked. Checking railway and road combinations.",
                 (
-                    "Rail schedules come from RailRadar; road connections use "
-                    "OpenStreetMap routing"
+                    "No direct flight worked. Checking verified railway schedules "
+                    "and mapped first/last-mile connections."
+                ),
+                (
+                    "Rail schedules come from RailRadar; OpenStreetMap routing is "
+                    "used only for connectors, never as a made-up coach timetable"
                 ),
             )
             try:
@@ -1371,17 +1562,15 @@ class Orchestrator:
                 await self._complete_task(
                     run,
                     task,
-                    f"Built {len(results)} railway/road journey options",
+                    f"Built {len(results)} verified railway journey options",
                     (
-                        "The direct route was decomposed into selectable transport "
-                        "legs; estimated fares are labelled"
+                        "The route was decomposed into selectable scheduled rail "
+                        "legs; estimated fares and connectors are labelled"
                     ),
                 )
                 return results
             except (ToolError, httpx.HTTPError) as error:
-                errors.append(
-                    f"multimodal fallback: {self._safe_external_error(error)}"
-                )
+                errors.append(f"multimodal fallback: {self._safe_external_error(error)}")
         task.status = TaskStatus.failed
         task.reason = "; ".join(errors)
         task.completed_at = utc_now()
@@ -1396,11 +1585,7 @@ class Orchestrator:
             or run.station_resolution_attempted
         ):
             return
-        cities = [
-            city
-            for city in (run.constraints.origin, run.constraints.destination)
-            if city
-        ]
+        cities = [city for city in (run.constraints.origin, run.constraints.destination) if city]
         if len(cities) != 2:
             return
         run.station_resolution_attempted = True
@@ -1454,9 +1639,7 @@ class Orchestrator:
                 ),
                 payload={
                     "origin_candidates": run.constraints.origin_station_codes,
-                    "destination_candidates": (
-                        run.constraints.destination_station_codes
-                    ),
+                    "destination_candidates": (run.constraints.destination_station_codes),
                 },
             )
         except SarvamModelError as error:
@@ -1474,10 +1657,7 @@ class Orchestrator:
             )
             await self.store.save_run(run)
         except (ToolError, httpx.HTTPError) as error:
-            run.errors.append(
-                "Station candidate validation: "
-                f"{self._safe_external_error(error)}"
-            )
+            run.errors.append(f"Station candidate validation: {self._safe_external_error(error)}")
             await self.store.save_run(run)
 
     async def _retry_single(
@@ -1853,9 +2033,7 @@ class Orchestrator:
         if preferences.home_city:
             details.append(f"depart from {preferences.home_city}")
         if preferences.avoid_early_flights:
-            earliest = str(
-                preferences.preferences.get("earliest_departure") or "08:00"
-            )
+            earliest = str(preferences.preferences.get("earliest_departure") or "08:00")
             details.append(f"avoid flights before {earliest}")
         if preferences.hotel_preference:
             details.append(f"stay near {preferences.hotel_preference}")
@@ -1890,12 +2068,8 @@ class Orchestrator:
             if values.get(field) is None and getattr(saved, field) is not None:
                 values[field] = getattr(saved, field)
                 applied_fields.append(field)
-        values["preferences"] = list(
-            dict.fromkeys([*current.preferences, *saved.preferences])
-        )
-        values["inferred_fields"] = list(
-            dict.fromkeys([*current.inferred_fields, *applied_fields])
-        )
+        values["preferences"] = list(dict.fromkeys([*current.preferences, *saved.preferences]))
+        values["inferred_fields"] = list(dict.fromkeys([*current.inferred_fields, *applied_fields]))
         merged = TravelConstraints.model_validate(values)
         merged.missing_fields = merged.required_missing()
         return merged

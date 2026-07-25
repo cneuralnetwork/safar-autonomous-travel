@@ -98,9 +98,7 @@ async def test_sarvam_fields_merge_with_validated_next_weekend_dates() -> None:
                 explicit_fields=["origin", "destination", "budget", "adults"],
                 inferred_fields=[],
                 assumptions=[],
-                assistant_message=(
-                    "I’ll plan Chennai to Jaipur next weekend within ₹40,000."
-                ),
+                assistant_message=("I’ll plan Chennai to Jaipur next weekend within ₹40,000."),
             ),
             metrics=ModelMetrics(
                 phase="interpretation",
@@ -230,6 +228,31 @@ async def test_budget_is_optional_when_route_and_dates_are_known() -> None:
 
     assert constraints.budget is None
     assert constraints.missing_fields == []
+
+
+async def test_traveller_count_is_not_misread_as_budget() -> None:
+    interpreter = RequestInterpreter(Settings(sarvam_api_key=None))
+    constraints = await interpreter.interpret(
+        "Trip to Delhi from Kolkata for 3 people",
+        today=date(2026, 7, 26),
+    )
+
+    assert constraints.origin == "Kolkata"
+    assert constraints.destination == "Delhi"
+    assert constraints.adults == 3
+    assert constraints.budget is None
+    assert constraints.missing_fields == ["start_date", "end_date"]
+
+
+async def test_budget_shorthand_still_requires_budget_language_or_currency() -> None:
+    interpreter = RequestInterpreter(Settings(sarvam_api_key=None))
+    constraints = await interpreter.interpret(
+        "Plan a trip from Kolkata to Delhi for 3 people under 25k",
+        today=date(2026, 7, 26),
+    )
+
+    assert constraints.adults == 3
+    assert constraints.budget == 25_000
 
 
 async def test_model_cannot_infer_an_unstated_traveller_count() -> None:
