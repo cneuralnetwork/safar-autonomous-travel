@@ -9,6 +9,7 @@ export const formatTime = (value: string) =>
   new Intl.DateTimeFormat('en-IN', {
     hour: 'numeric',
     minute: '2-digit',
+    timeZone: 'Asia/Kolkata',
   }).format(new Date(value));
 
 export const formatDate = (value: string) =>
@@ -30,4 +31,3 @@ export const relativeDate = (value: string) => {
     month: 'short',
   }).format(date);
 };
-
