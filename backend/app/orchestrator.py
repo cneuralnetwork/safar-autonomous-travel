@@ -7,6 +7,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+import httpx
+
 from app.calendar_service import CalendarService
 from app.interpreter import RequestInterpreter
 from app.itinerary import create_itinerary
@@ -168,7 +170,11 @@ class Orchestrator:
         constraints = await self.interpreter.interpret(request.text, base_constraints)
         run = (
             current_run
-            if current_run and current_run.status == RunStatus.awaiting_input
+            if (
+                current_run
+                and current_run.status == RunStatus.awaiting_input
+                and current_run.graph is None
+            )
             else RunState(
                 conversation_id=conversation_id,
                 user_id=user.id,
@@ -313,15 +319,27 @@ class Orchestrator:
 
             places_task = self._task(run, "place_search")
             await self._start_task(run, places_task)
-            run.places = await self._retry_single(
-                run, places_task, "google_places", lambda: self.tools.places.search(run.constraints)
-            )
-            await self._complete_task(
-                run,
-                places_task,
-                f"Found {len(run.places)} itinerary candidates",
-                "Selected well-rated activities with usable location data",
-            )
+            try:
+                run.places = await self._retry_single(
+                    run,
+                    places_task,
+                    "google_places",
+                    lambda: self.tools.places.search(run.constraints),
+                )
+                await self._complete_task(
+                    run,
+                    places_task,
+                    f"Found {len(run.places)} itinerary candidates",
+                    "Selected well-rated activities with usable location data",
+                )
+            except (ToolError, httpx.HTTPError) as error:
+                run.errors.append(f"Place search fallback: {error}")
+                await self._complete_task(
+                    run,
+                    places_task,
+                    "Place search was unavailable; continuing with flexible time blocks",
+                    "The flight and hotel plan is still valid; no place data was invented",
+                )
 
             itinerary_task = self._task(run, "create_itinerary")
             await self._start_task(run, itinerary_task)
@@ -361,6 +379,26 @@ class Orchestrator:
                 MessageKind.approval,
                 f"Ready to add {event_count} events to Google Calendar.",
                 {"approval": run.approval.model_dump(mode="json")},
+            )
+        except ToolError as error:
+            run.errors.append(str(error))
+            run.status = RunStatus.awaiting_input
+            await self.store.save_run(run)
+            await self._message(
+                run,
+                MessageKind.clarification,
+                (
+                    "The travel providers could not return a complete set of options "
+                    "after retries and fallbacks. Change a constraint and I’ll try again."
+                ),
+                {
+                    "quick_replies": [
+                        "Allow earlier flights",
+                        "Show hotels a little farther away",
+                        "I’ll give different dates",
+                    ],
+                    "error": str(error),
+                },
             )
         except Exception as error:
             run.errors.append(str(error))
@@ -513,7 +551,11 @@ class Orchestrator:
                         ),
                     )
                     return results
-                except TemporaryToolError as error:
+                except (
+                    TemporaryToolError,
+                    httpx.TimeoutException,
+                    httpx.NetworkError,
+                ) as error:
                     errors.append(f"{provider.name}: {error}")
                     if attempt < task.retry_policy:
                         run.retries += 1
@@ -529,7 +571,7 @@ class Orchestrator:
                         await asyncio.sleep(0.25 * (attempt + 1))
                         continue
                     break
-                except (NoResultsError, ToolError) as error:
+                except (NoResultsError, ToolError, httpx.HTTPStatusError) as error:
                     errors.append(f"{provider.name}: {error}")
                     await self._operation(
                         run,
@@ -561,13 +603,21 @@ class Orchestrator:
             task.provider = provider
             try:
                 return await function()
-            except TemporaryToolError as error:
+            except (
+                TemporaryToolError,
+                httpx.TimeoutException,
+                httpx.NetworkError,
+            ) as error:
                 if attempt >= task.retry_policy:
                     raise
                 run.retries += 1
                 task.status = TaskStatus.retrying
                 await self._operation(run, task, f"{provider} timed out. Retrying.", str(error))
                 await asyncio.sleep(0.25 * (attempt + 1))
+            except httpx.HTTPStatusError as error:
+                raise ToolError(
+                    f"{provider} rejected the place search: {error.response.status_code}"
+                ) from error
         raise ToolError(f"{provider} failed")
 
     async def _start_task(self, run: RunState, task: TaskNode) -> None:

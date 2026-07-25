@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -17,7 +18,7 @@ from app.models import (
 from app.orchestrator import CalendarConnectionRequired, Orchestrator
 from app.planner import build_task_graph
 from app.store import SQLiteStore, TokenCipher
-from app.travel_tools import TravelToolRegistry
+from app.travel_tools import NoResultsError, TemporaryToolError, TravelToolRegistry
 
 
 async def build_orchestrator(path: Path) -> tuple[Orchestrator, UserIdentity]:
@@ -225,3 +226,69 @@ async def test_approval_edit_starts_a_revised_run_with_existing_constraints(
     assert revised.constraints.budget == 35_000
     assert revised.constraints.earliest_departure is not None
     assert revised.constraints.earliest_departure.hour == 8
+
+
+async def test_place_search_failure_keeps_the_valid_trip_and_labels_flexible_time(
+    tmp_path: Path,
+) -> None:
+    orchestrator, user = await build_orchestrator(tmp_path / "place-fallback.db")
+    orchestrator.tools.places.search = AsyncMock(
+        side_effect=TemporaryToolError("places timeout")
+    )
+    snapshot = await orchestrator.create_conversation(
+        user,
+        "plan a 3-day trip from Kolkata to Goa next weekend under ₹30,000",
+        False,
+    )
+
+    await wait_for_status(
+        orchestrator,
+        user,
+        snapshot.conversation.id,
+        RunStatus.awaiting_approval,
+    )
+    run = (await orchestrator.snapshot(user, snapshot.conversation.id)).active_run
+
+    assert run is not None
+    assert run.itinerary is not None
+    assert any(
+        item.title == "Flexible time in Goa"
+        for day in run.itinerary.days
+        for item in day.items
+    )
+    assert any("Place search fallback" in error for error in run.errors)
+
+
+class EmptyTravelProvider:
+    name = "empty"
+
+    async def search_flights(self, _constraints):
+        raise NoResultsError("no flights")
+
+    async def search_hotels(self, _constraints):
+        raise NoResultsError("no hotels")
+
+
+async def test_exhausted_travel_providers_return_to_chat_for_replanning(
+    tmp_path: Path,
+) -> None:
+    orchestrator, user = await build_orchestrator(tmp_path / "provider-failure.db")
+    orchestrator.tools.providers = [EmptyTravelProvider()]
+    snapshot = await orchestrator.create_conversation(
+        user,
+        "plan a 3-day trip from Kolkata to Goa next weekend under ₹30,000",
+        False,
+    )
+
+    await wait_for_status(
+        orchestrator,
+        user,
+        snapshot.conversation.id,
+        RunStatus.awaiting_input,
+    )
+    result = await orchestrator.snapshot(user, snapshot.conversation.id)
+
+    assert result.active_run is not None
+    assert result.active_run.graph is not None
+    assert result.messages[-1].kind == "clarification"
+    assert "retries and fallbacks" in result.messages[-1].text

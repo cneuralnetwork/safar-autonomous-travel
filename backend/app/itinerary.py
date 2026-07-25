@@ -138,6 +138,23 @@ def create_itinerary(
             cursor += duration + timedelta(minutes=45)
             place_index += 1
 
+        if not route and cursor + timedelta(hours=2) <= latest_end:
+            items.append(
+                ItineraryItem(
+                    title=f"Flexible time in {constraints.destination}",
+                    description=(
+                        "Live place search was unavailable. This block is intentionally "
+                        "left flexible near the hotel rather than inventing an attraction."
+                    ),
+                    start_at=cursor,
+                    end_at=cursor + timedelta(hours=2),
+                    location=selected.hotel.address,
+                    latitude=selected.hotel.latitude,
+                    longitude=selected.hotel.longitude,
+                    category="activity",
+                )
+            )
+
         if last_day and selected.flight.inbound:
             inbound = selected.flight.inbound
             transfer_end = inbound[0].departure_at - timedelta(hours=2)
