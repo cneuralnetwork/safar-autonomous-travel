@@ -174,27 +174,112 @@ class SerpApiProvider:
             "sort_by": "2",
         }
         response = await self.client.get("https://serpapi.com/search.json", params=params)
+        body = self._response_body(response, "flight search")
+        outbound_candidates = (body.get("best_flights") or []) + (body.get("other_flights") or [])
+        # A round-trip search returns outbound choices first. SerpApi requires a
+        # second request with each departure_token to retrieve genuine return legs.
+        # Resolve a bounded shortlist concurrently to avoid inventing an inbound leg.
+        return_searches = await asyncio.gather(
+            *[
+                self._return_options(params, outbound)
+                for outbound in outbound_candidates[:4]
+                if outbound.get("departure_token")
+            ],
+            return_exceptions=True,
+        )
+        results: list[FlightOption] = []
+        temporary_errors: list[Exception] = []
+        for paired in return_searches:
+            if isinstance(paired, Exception):
+                if isinstance(paired, TemporaryToolError):
+                    temporary_errors.append(paired)
+                continue
+            results.extend(
+                normalized
+                for outbound, inbound in paired[:2]
+                if (
+                    normalized := self._normalize_round_trip(
+                        outbound,
+                        inbound,
+                        constraints,
+                    )
+                )
+                is not None
+            )
+        if not results:
+            if temporary_errors:
+                raise TemporaryToolError(str(temporary_errors[0]))
+            raise NoResultsError("SerpApi returned no matching flights")
+        return results[:14]
+
+    async def _return_options(
+        self,
+        base_params: dict[str, Any],
+        outbound: dict[str, Any],
+    ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+        params = dict(base_params)
+        params["departure_token"] = outbound["departure_token"]
+        response = await self.client.get("https://serpapi.com/search.json", params=params)
+        body = self._response_body(response, "return flight search")
+        candidates = (body.get("best_flights") or []) + (body.get("other_flights") or [])
+        return [(outbound, inbound) for inbound in candidates]
+
+    @staticmethod
+    def _response_body(response: httpx.Response, operation: str) -> dict[str, Any]:
         if response.status_code in {408, 429, 500, 502, 503, 504}:
-            raise TemporaryToolError(f"SerpApi flight search returned {response.status_code}")
-        response.raise_for_status()
+            raise TemporaryToolError(f"SerpApi {operation} returned {response.status_code}")
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            raise ToolError(f"SerpApi {operation} failed: {response.status_code}") from error
         body = response.json()
         if body.get("error"):
             raise ToolError(str(body["error"]))
-        candidates = (body.get("best_flights") or []) + (body.get("other_flights") or [])
-        results = [
-            normalized
-            for item in candidates[:14]
-            if (normalized := self._normalize_flight(item, constraints)) is not None
-        ]
-        if not results:
-            raise NoResultsError("SerpApi returned no matching flights")
-        return results
+        return body
 
-    def _normalize_flight(
-        self, item: dict[str, Any], constraints: TravelConstraints
+    def _normalize_round_trip(
+        self,
+        outbound_item: dict[str, Any],
+        inbound_item: dict[str, Any],
+        constraints: TravelConstraints,
     ) -> FlightOption | None:
+        outbound = self._normalize_segments(outbound_item, constraints)
+        inbound = self._normalize_segments(
+            inbound_item,
+            constraints,
+            reverse=True,
+        )
+        price = inbound_item.get("price") or outbound_item.get("price")
+        if not outbound or not inbound or not price:
+            return None
+        identifier = hashlib.sha1(f"{outbound_item}|{inbound_item}".encode()).hexdigest()[:12]
+        extensions = list(outbound_item.get("extensions") or []) + list(
+            inbound_item.get("extensions") or []
+        )
+        baggage = next(
+            (str(item) for item in extensions if "bag" in str(item).lower()),
+            "Check fare rules with the provider",
+        )
+        return FlightOption(
+            id=f"serp-{identifier}",
+            provider=self.name,
+            outbound=outbound,
+            inbound=inbound,
+            # SerpApi prices already reflect the passenger counts in the search.
+            total_price=math.ceil(float(price)),
+            stops=max(0, len(outbound) - 1),
+            baggage=baggage,
+        )
+
+    def _normalize_segments(
+        self,
+        item: dict[str, Any],
+        constraints: TravelConstraints,
+        *,
+        reverse: bool = False,
+    ) -> list[FlightSegment] | None:
         raw_segments = item.get("flights") or []
-        if not raw_segments or not item.get("price"):
+        if not raw_segments:
             return None
         segments: list[FlightSegment] = []
         for raw in raw_segments:
@@ -209,38 +294,18 @@ class SerpApiProvider:
                 FlightSegment(
                     airline=raw.get("airline") or "Airline",
                     flight_number=raw.get("flight_number"),
-                    departure_airport=departure.get("id") or constraints.origin_airport or "ORG",
-                    arrival_airport=arrival.get("id") or constraints.destination_airport or "DST",
+                    departure_airport=departure.get("id")
+                    or (constraints.destination_airport if reverse else constraints.origin_airport)
+                    or "ORG",
+                    arrival_airport=arrival.get("id")
+                    or (constraints.origin_airport if reverse else constraints.destination_airport)
+                    or "DST",
                     departure_at=departure_at,
                     arrival_at=arrival_at,
                     duration_minutes=int(raw.get("duration") or 0),
                 )
             )
-        return_date = constraints.end_date or segments[-1].arrival_at.date()
-        return_departure = datetime.combine(return_date, time(15, 30), tzinfo=IST)
-        total_duration = max(120, sum(segment.duration_minutes for segment in segments))
-        airline = segments[0].airline
-        inbound = [
-            FlightSegment(
-                airline=airline,
-                flight_number=None,
-                departure_airport=constraints.destination_airport or "DST",
-                arrival_airport=constraints.origin_airport or "ORG",
-                departure_at=return_departure,
-                arrival_at=return_departure + timedelta(minutes=total_duration),
-                duration_minutes=total_duration,
-            )
-        ]
-        return FlightOption(
-            id=f"serp-{hashlib.sha1(str(item).encode()).hexdigest()[:12]}",
-            provider=self.name,
-            outbound=segments,
-            inbound=inbound,
-            total_price=int(float(item["price"])) * constraints.adults,
-            stops=max(0, len(segments) - 1),
-            baggage="Check fare rules with the provider",
-            booking_url=item.get("booking_token"),
-        )
+        return segments
 
     async def search_hotels(self, constraints: TravelConstraints) -> list[HotelOption]:
         params = {
@@ -515,6 +580,69 @@ class PlacesProvider:
             raise NoResultsError("Google Places returned no activities")
         return results
 
+    async def enrich_hotel_distances(
+        self,
+        hotels: list[HotelOption],
+        constraints: TravelConstraints,
+    ) -> list[HotelOption]:
+        if (
+            not constraints.hotel_area_preference
+            or constraints.max_hotel_distance_km is None
+            or all(hotel.distance_to_preference_km is not None for hotel in hotels)
+        ):
+            return hotels
+        if not self.api_key:
+            return hotels
+        response = await self.client.post(
+            "https://places.googleapis.com/v1/places:searchText",
+            headers={
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": self.api_key,
+                "X-Goog-FieldMask": "places.location",
+            },
+            json={
+                "textQuery": (
+                    f"{constraints.hotel_area_preference} places in {constraints.destination}"
+                ),
+                "pageSize": 10,
+                "languageCode": "en",
+                "regionCode": "IN",
+            },
+        )
+        if response.status_code in {408, 429, 500, 502, 503, 504}:
+            raise TemporaryToolError(
+                f"Google Places distance verification returned {response.status_code}"
+            )
+        response.raise_for_status()
+        reference_points = [
+            (float(location["latitude"]), float(location["longitude"]))
+            for item in response.json().get("places") or []
+            if (location := item.get("location"))
+            and "latitude" in location
+            and "longitude" in location
+        ]
+        if not reference_points:
+            return hotels
+        for hotel in hotels:
+            if (
+                hotel.distance_to_preference_km is None
+                and hotel.latitude is not None
+                and hotel.longitude is not None
+            ):
+                hotel.distance_to_preference_km = round(
+                    min(
+                        _haversine_km(
+                            hotel.latitude,
+                            hotel.longitude,
+                            latitude,
+                            longitude,
+                        )
+                        for latitude, longitude in reference_points
+                    ),
+                    1,
+                )
+        return hotels
+
     def _demo_places(self, constraints: TravelConstraints) -> list[PlaceOption]:
         destination = constraints.destination or "Goa"
         names = [
@@ -563,3 +691,30 @@ class TravelToolRegistry:
 
     def provider_names(self) -> list[str]:
         return [provider.name for provider in self.providers]
+
+    async def enrich_hotel_distances(
+        self,
+        hotels: list[HotelOption],
+        constraints: TravelConstraints,
+    ) -> list[HotelOption]:
+        return await self.places.enrich_hotel_distances(hotels, constraints)
+
+
+def _haversine_km(
+    latitude_a: float,
+    longitude_a: float,
+    latitude_b: float,
+    longitude_b: float,
+) -> float:
+    radius_km = 6371.0088
+    latitude_a_radians = math.radians(latitude_a)
+    latitude_b_radians = math.radians(latitude_b)
+    latitude_delta = math.radians(latitude_b - latitude_a)
+    longitude_delta = math.radians(longitude_b - longitude_a)
+    value = (
+        math.sin(latitude_delta / 2) ** 2
+        + math.cos(latitude_a_radians)
+        * math.cos(latitude_b_radians)
+        * math.sin(longitude_delta / 2) ** 2
+    )
+    return 2 * radius_km * math.asin(math.sqrt(value))

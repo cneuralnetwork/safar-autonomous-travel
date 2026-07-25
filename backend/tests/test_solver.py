@@ -1,6 +1,6 @@
 from datetime import date, time
 
-from app.models import TravelConstraints
+from app.models import HotelOption, TravelConstraints
 from app.solver import compare_packages
 from app.travel_tools import DemoTravelProvider
 
@@ -54,3 +54,35 @@ async def test_solver_explains_impossible_budget() -> None:
 
     assert result.valid == []
     assert result.rejection_summary["package exceeds the total budget"] > 0
+
+
+async def test_solver_rejects_unverified_distance_when_area_is_a_hard_constraint() -> None:
+    constraints = TravelConstraints(
+        origin="Kolkata",
+        destination="Goa",
+        origin_airport="CCU",
+        destination_airport="GOI",
+        start_date=date(2026, 7, 31),
+        end_date=date(2026, 8, 2),
+        adults=1,
+        budget=100_000,
+        hotel_area_preference="beach",
+        max_hotel_distance_km=2,
+    )
+    provider = DemoTravelProvider()
+    flights = await provider.search_flights(constraints)
+    hotel = HotelOption(
+        id="unknown-distance",
+        provider="test",
+        name="Unknown Distance Hotel",
+        address="Goa",
+        rating=4.5,
+        nightly_price=2_000,
+        total_price=4_000,
+        distance_to_preference_km=None,
+    )
+
+    result = compare_packages(flights, [hotel], constraints)
+
+    assert result.valid == []
+    assert result.rejection_summary["hotel distance could not be verified"] > 0

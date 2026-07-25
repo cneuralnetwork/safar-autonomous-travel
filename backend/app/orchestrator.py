@@ -444,6 +444,11 @@ class Orchestrator:
                     ):
                         raise TemporaryToolError("Injected provider timeout")
                     results = await method(run.constraints)
+                    if task_id == "hotel_search":
+                        results = await self.tools.enrich_hotel_distances(
+                            results,
+                            run.constraints,
+                        )
                     await self._complete_task(
                         run,
                         task,
@@ -643,16 +648,12 @@ class Orchestrator:
             ],
         )
 
-    async def _remember_preferences(
-        self, user_id: str, constraints: TravelConstraints
-    ) -> None:
+    async def _remember_preferences(self, user_id: str, constraints: TravelConstraints) -> None:
         existing = await self.store.get_user_preferences(user_id)
         preferences = UserPreferences(
             user_id=user_id,
             home_city=(
-                existing.home_city
-                if existing and existing.home_city
-                else constraints.origin
+                existing.home_city if existing and existing.home_city else constraints.origin
             ),
             preferred_airport=(
                 existing.preferred_airport
@@ -660,8 +661,7 @@ class Orchestrator:
                 else constraints.origin_airport
             ),
             avoid_early_flights=bool(
-                constraints.earliest_departure
-                or (existing and existing.avoid_early_flights)
+                constraints.earliest_departure or (existing and existing.avoid_early_flights)
             ),
             hotel_preference=(
                 constraints.hotel_area_preference
@@ -676,11 +676,7 @@ class Orchestrator:
                 "max_hotel_distance_km": (
                     constraints.max_hotel_distance_km
                     if constraints.max_hotel_distance_km is not None
-                    else (
-                        existing.preferences.get("max_hotel_distance_km")
-                        if existing
-                        else None
-                    )
+                    else (existing.preferences.get("max_hotel_distance_km") if existing else None)
                 ),
                 "preferences": sorted(
                     set(constraints.preferences)

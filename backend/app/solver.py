@@ -38,6 +38,11 @@ def compare_packages(
                 reasons.append("flight departs before preferred time")
             if (
                 constraints.max_hotel_distance_km is not None
+                and hotel.distance_to_preference_km is None
+            ):
+                reasons.append("hotel distance could not be verified")
+            elif (
+                constraints.max_hotel_distance_km is not None
                 and hotel.distance_to_preference_km is not None
                 and hotel.distance_to_preference_km > constraints.max_hotel_distance_km
             ):
