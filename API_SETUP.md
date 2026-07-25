@@ -9,14 +9,15 @@ guest, Apple, or GitHub sign-in path.
 
 Create a project in the Mumbai region when available.
 
-1. Run `supabase/migrations/20260725140000_initial.sql` in the SQL editor.
+1. Apply every SQL file in `supabase/migrations/` in timestamp order. The
+   production Safar project already has these migrations applied.
 2. In **Authentication → Providers**, enable Google and disable all other
    providers, including email/password.
 3. Copy the project URL, publishable key, and secret/service-role key.
 4. Configure:
 
 ```env
-SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_URL=https://uthdtiesqkjcblmyouuv.supabase.co
 SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
 SUPABASE_SECRET_KEY=sb_secret_...
 ```
@@ -36,9 +37,9 @@ accounts as test users. Create a **Web application** OAuth client with:
 
 ```text
 Authorized redirect URI:
-https://<project-ref>.supabase.co/auth/v1/callback
-https://<render-service>.onrender.com/v1/auth/google/callback
-https://<render-service>.onrender.com/v1/calendar/callback
+https://uthdtiesqkjcblmyouuv.supabase.co/auth/v1/callback
+https://safar-api-ax08.onrender.com/v1/auth/google/callback
+https://safar-api-ax08.onrender.com/v1/calendar/callback
 ```
 
 Use the same Web client ID and secret in Supabase’s Google provider page.
@@ -49,7 +50,7 @@ callback bridge.
 Set:
 
 ```env
-GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_ID=794463475484-cd5fuuenapv78tb3infpoiruvebtbhtr.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=...
 GOOGLE_MAPS_API_KEY=...
 ```
@@ -103,7 +104,7 @@ credentials use `AMADEUS_ENV=test`.
 ## Required application secrets
 
 ```env
-PUBLIC_BASE_URL=https://<render-service>.onrender.com
+PUBLIC_BASE_URL=https://safar-api-ax08.onrender.com
 TOKEN_ENCRYPTION_KEY=<fernet-key>
 ```
 
@@ -121,8 +122,8 @@ Render can generate this value automatically from `render.yaml`.
 Create `mobile/.env`:
 
 ```env
-EXPO_PUBLIC_API_URL=https://<render-service>.onrender.com
-EXPO_PUBLIC_SUPABASE_URL=https://<project-ref>.supabase.co
+EXPO_PUBLIC_API_URL=https://safar-api-ax08.onrender.com
+EXPO_PUBLIC_SUPABASE_URL=https://uthdtiesqkjcblmyouuv.supabase.co
 EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
 ```
 

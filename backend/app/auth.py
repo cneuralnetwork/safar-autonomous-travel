@@ -146,7 +146,11 @@ class GoogleAuthBridge:
                     "apikey": self.settings.supabase_publishable_key or "",
                     "Content-Type": "application/json",
                 },
-                json={"provider": "google", "id_token": google_tokens["id_token"]},
+                json={
+                    "provider": "google",
+                    "id_token": google_tokens["id_token"],
+                    "nonce": attempt.nonce,
+                },
             )
             session_response.raise_for_status()
             raw_session = session_response.json()

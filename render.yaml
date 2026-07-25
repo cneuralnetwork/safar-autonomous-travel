@@ -5,8 +5,8 @@ services:
     plan: free
     region: singapore
     rootDir: backend
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     healthCheckPath: /health
     autoDeployTrigger: checksPass
     envVars:
