@@ -38,7 +38,7 @@ accounts as test users. Create a **Web application** OAuth client with:
 ```text
 Authorized redirect URI:
 https://uthdtiesqkjcblmyouuv.supabase.co/auth/v1/callback
-https://safar-api-ax08.onrender.com/v1/auth/google/callback
+https://safar-autonomous-travel.onrender.com/v1/auth/google/callback
 ```
 
 Use the same Web client ID and secret in Supabase’s Google provider page.
@@ -103,7 +103,7 @@ credentials use `AMADEUS_ENV=test`.
 ## Required application secrets
 
 ```env
-PUBLIC_BASE_URL=https://safar-api-ax08.onrender.com
+PUBLIC_BASE_URL=https://safar-autonomous-travel.onrender.com
 TOKEN_ENCRYPTION_KEY=<fernet-key>
 ```
 
@@ -121,7 +121,7 @@ Render can generate this value automatically from `render.yaml`.
 Create `mobile/.env`:
 
 ```env
-EXPO_PUBLIC_API_URL=https://safar-api-ax08.onrender.com
+EXPO_PUBLIC_API_URL=https://safar-autonomous-travel.onrender.com
 EXPO_PUBLIC_SUPABASE_URL=https://uthdtiesqkjcblmyouuv.supabase.co
 EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
 ```

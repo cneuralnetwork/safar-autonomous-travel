@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   Animated,
   Easing,
+  Platform,
   StyleSheet,
   Text,
   View,
@@ -51,12 +52,13 @@ export function TravelThinkingIndicator({
   const thought = travelThoughts[thoughtIndex] ?? travelThoughts[0]!;
 
   useEffect(() => {
+    const useNativeDriver = Platform.OS !== 'web';
     const orbitLoop = Animated.loop(
       Animated.timing(orbit, {
         toValue: 1,
         duration: 2200,
         easing: Easing.linear,
-        useNativeDriver: true,
+        useNativeDriver,
       }),
     );
     const breatheLoop = Animated.loop(
@@ -65,13 +67,13 @@ export function TravelThinkingIndicator({
           toValue: 1,
           duration: 760,
           easing: Easing.inOut(Easing.quad),
-          useNativeDriver: true,
+          useNativeDriver,
         }),
         Animated.timing(breathe, {
           toValue: 0,
           duration: 760,
           easing: Easing.inOut(Easing.quad),
-          useNativeDriver: true,
+          useNativeDriver,
         }),
       ]),
     );
@@ -115,7 +117,9 @@ export function TravelThinkingIndicator({
         >
           <View style={styles.orbitDot} />
         </Animated.View>
-        <Ionicons name={thought.icon} color={colors.primary} size={20} />
+        <Animated.View style={{ transform: [{ rotate }] }}>
+          <Ionicons name={thought.icon} color={colors.primary} size={20} />
+        </Animated.View>
       </Animated.View>
       <View style={styles.copy}>
         <Text style={styles.lead}>{phaseLead[phase] ?? 'Safar is thinking'}</Text>

@@ -83,6 +83,7 @@ app.add_middleware(
     allow_credentials=settings.cors_origins != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    max_age=86_400,
 )
 
 

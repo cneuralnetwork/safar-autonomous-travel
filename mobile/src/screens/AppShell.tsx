@@ -156,9 +156,27 @@ export function AppShell() {
       }
       setError(null);
     } catch (refreshError) {
+      if (refreshError instanceof ApiError && refreshError.status === 404) {
+        setConversationId((current) =>
+          current === conversationId ? null : current,
+        );
+        setSnapshot(null);
+        setEvents([]);
+        eventCursorRef.current = 0;
+        await refreshConversations();
+        setError(
+          'That saved trip is not available on this deployment. Your trip list was refreshed.',
+        );
+        return;
+      }
       setError(messageForError(refreshError));
     }
-  }, [accessToken, conversationId, mergeEvents]);
+  }, [
+    accessToken,
+    conversationId,
+    mergeEvents,
+    refreshConversations,
+  ]);
 
   useEffect(() => {
     void refreshConversations();

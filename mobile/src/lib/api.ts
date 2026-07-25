@@ -8,7 +8,16 @@ import type {
 } from '@/types';
 
 const baseUrl =
-  process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '') || 'http://127.0.0.1:8000';
+  process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '') ||
+  'https://safar-autonomous-travel.onrender.com';
+
+const readRetryDelays = [300, 900];
+
+function wait(milliseconds: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
 
 export class ApiError extends Error {
   status: number;
@@ -21,12 +30,49 @@ export class ApiError extends Error {
   }
 }
 
+async function fetchWithRenderRecovery(
+  url: string,
+  init?: RequestInit,
+): Promise<Response> {
+  const method = (init?.method || 'GET').toUpperCase();
+  const retryDelays = method === 'GET' ? readRetryDelays : [];
+
+  for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+    try {
+      const response = await fetch(url, init);
+      const renderMiss =
+        response.status === 404 &&
+        response.headers.get('x-render-routing') === 'no-server';
+
+      if (!renderMiss) return response;
+      if (attempt === retryDelays.length) {
+        throw new ApiError(
+          503,
+          'Safar’s server is waking up. Please try again in a moment.',
+        );
+      }
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      if (init?.signal?.aborted || attempt === retryDelays.length) {
+        throw new ApiError(
+          0,
+          'Safar could not reach the travel server. Please try again.',
+        );
+      }
+    }
+
+    await wait(retryDelays[attempt] ?? 0);
+  }
+
+  throw new ApiError(503, 'Safar’s travel server is temporarily unavailable.');
+}
+
 async function apiRequest<T>(
   path: string,
   accessToken: string,
   init?: RequestInit,
 ): Promise<T> {
-  const response = await fetch(`${baseUrl}${path}`, {
+  const response = await fetchWithRenderRecovery(`${baseUrl}${path}`, {
     ...init,
     headers: {
       Authorization: `Bearer ${accessToken}`,
