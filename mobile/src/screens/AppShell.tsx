@@ -405,6 +405,11 @@ function PlanScreen({
         renderItem={({ item }) => (
           <MessageRenderer
             message={item}
+            activeGraph={
+              item.run_id === snapshot.active_run?.id
+                ? snapshot.active_run.graph
+                : undefined
+            }
             onQuickReply={(reply) => void onSend(reply)}
             onApproval={onApproval}
             approvalBusy={approvalBusy}

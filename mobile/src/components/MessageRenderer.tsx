@@ -25,6 +25,7 @@ import { ItineraryMap } from '@/components/ItineraryMap';
 
 interface MessageRendererProps {
   message: ChatMessage;
+  activeGraph?: TaskGraph;
   onQuickReply: (text: string) => void;
   onApproval: (decision: 'approve' | 'edit' | 'cancel') => void;
   approvalBusy: boolean;
@@ -32,6 +33,7 @@ interface MessageRendererProps {
 
 export const MessageRenderer = memo(function MessageRenderer({
   message,
+  activeGraph,
   onQuickReply,
   onApproval,
   approvalBusy,
@@ -64,7 +66,11 @@ export const MessageRenderer = memo(function MessageRenderer({
         />
       );
     case 'task_graph':
-      return <TaskGraphCard graph={message.payload.graph as TaskGraph} />;
+      return (
+        <TaskGraphCard
+          graph={activeGraph || (message.payload.graph as TaskGraph)}
+        />
+      );
     case 'operation':
       return <OperationRow event={message.payload.event as OperationEvent} />;
     case 'flight_options':
