@@ -20,6 +20,7 @@ The repository contains:
 - Search and planning are safe; calendar writes always require approval.
 - The LLM interprets intent, while deterministic code enforces constraints.
 - Every task, retry, fallback, rejection, and external action is recorded.
+- Past trips and reusable preferences are persisted per Google account.
 - Real providers activate when configured. Deterministic demo providers keep
   local development and automated tests reliable.
 
