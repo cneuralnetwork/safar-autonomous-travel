@@ -1,0 +1,52 @@
+services:
+  - type: web
+    name: safar-api
+    runtime: docker
+    plan: free
+    region: singapore
+    rootDir: backend
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_NAME
+        value: Safar API
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: TOKEN_ENCRYPTION_KEY
+        generateValue: true
+      - key: SARVAM_API_KEY
+        sync: false
+      - key: SARVAM_MODEL
+        value: sarvam-105b
+      - key: SERPAPI_API_KEY
+        sync: false
+      - key: AMADEUS_CLIENT_ID
+        sync: false
+      - key: AMADEUS_CLIENT_SECRET
+        sync: false
+      - key: AMADEUS_ENV
+        value: production
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
+      - key: TRAVEL_PROVIDER_MODE
+        value: auto
+      - key: ENABLE_RESILIENCE_DEMO
+        value: "true"
+      - key: AUTH_DISABLED
+        value: "false"

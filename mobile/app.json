@@ -1,0 +1,48 @@
+{
+  "expo": {
+    "name": "Safar",
+    "slug": "safar-autonomous-travel",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "safar",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#EFEFED"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "app.safar.travel"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#EFEFED"
+      },
+      "package": "app.safar.travel",
+      "edgeToEdgeEnabled": true
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-web-browser",
+        {
+          "experimentalLauncherActivity": false
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
+
