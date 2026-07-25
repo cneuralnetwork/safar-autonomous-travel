@@ -10,6 +10,7 @@ import {
 import type { Session } from '@supabase/supabase-js';
 import * as Crypto from 'expo-crypto';
 import * as WebBrowser from 'expo-web-browser';
+import { Platform } from 'react-native';
 import { authApi } from '@/lib/api';
 import { supabase } from '@/lib/supabase';
 
@@ -40,7 +41,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    void WebBrowser.warmUpAsync();
+    if (Platform.OS !== 'web') {
+      void WebBrowser.warmUpAsync();
+    }
     void supabase.auth.getSession().then(({ data }) => {
       setSession(data.session);
       setLoading(false);
@@ -53,7 +56,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
     });
     return () => {
       subscription.unsubscribe();
-      void WebBrowser.coolDownAsync();
+      if (Platform.OS !== 'web') {
+        void WebBrowser.coolDownAsync();
+      }
     };
   }, []);
 
@@ -114,4 +119,3 @@ export function useAuth(): AuthContextValue {
   }
   return value;
 }
-
