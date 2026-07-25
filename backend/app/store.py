@@ -63,6 +63,9 @@ class Store(ABC):
     async def get_active_run(self, conversation_id: UUID, user_id: str) -> RunState | None: ...
 
     @abstractmethod
+    async def list_recoverable_runs(self) -> list[RunState]: ...
+
+    @abstractmethod
     async def save_calendar_connection(self, user_id: str, payload: dict[str, Any]) -> None: ...
 
     @abstractmethod
@@ -81,9 +84,15 @@ class Store(ABC):
 class SQLiteStore(Store):
     def __init__(self, path: str) -> None:
         self.path = path
+        self._memory_connection: sqlite3.Connection | None = None
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=10)
+        if self.path == ":memory:":
+            if self._memory_connection is None:
+                self._memory_connection = sqlite3.connect(self.path, timeout=10)
+            connection = self._memory_connection
+        else:
+            connection = sqlite3.connect(self.path, timeout=10)
         connection.execute("pragma journal_mode = wal")
         connection.execute("pragma foreign_keys = on")
         return connection
@@ -293,6 +302,18 @@ class SQLiteStore(Store):
             )
             row = cursor.fetchone()
         return RunState.model_validate_json(row[0]) if row else None
+
+    async def list_recoverable_runs(self) -> list[RunState]:
+        with self._connect() as db:
+            cursor = db.execute(
+                """
+                select payload from runs
+                where status in ('planned', 'running')
+                order by updated_at asc
+                """
+            )
+            rows = cursor.fetchall()
+        return [RunState.model_validate_json(row[0]) for row in rows]
 
     async def save_calendar_connection(self, user_id: str, payload: dict[str, Any]) -> None:
         with self._connect() as db:
@@ -552,6 +573,18 @@ class SupabaseStore(Store):
             },
         )
         return RunState.model_validate(rows[0]["state"]) if rows else None
+
+    async def list_recoverable_runs(self) -> list[RunState]:
+        rows = await self._request(
+            "GET",
+            "runs",
+            params={
+                "select": "state",
+                "status": "in.(planned,running)",
+                "order": "updated_at.asc",
+            },
+        )
+        return [RunState.model_validate(row["state"]) for row in rows]
 
     async def save_calendar_connection(self, user_id: str, payload: dict[str, Any]) -> None:
         await self._request(

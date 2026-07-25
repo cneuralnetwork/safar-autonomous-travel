@@ -58,6 +58,50 @@ class Orchestrator:
         self.calendar = calendar
         self.background_tasks: set[asyncio.Task[Any]] = set()
 
+    async def recover_pending_runs(self) -> int:
+        recovered = 0
+        for run in await self.store.list_recoverable_runs():
+            if not run.graph:
+                continue
+            for task in run.graph.tasks:
+                if task.id in {"understand_request", "resolve_constraints"}:
+                    continue
+                task.status = TaskStatus.waiting
+                task.attempts = 0
+                task.provider = None
+                task.summary = None
+                task.reason = None
+                task.started_at = None
+                task.completed_at = None
+            run.status = RunStatus.planned
+            run.flights = []
+            run.hotels = []
+            run.places = []
+            run.packages = []
+            run.selected_package = None
+            run.itinerary = None
+            run.approval = None
+            await self.store.save_run(run)
+            event = OperationEvent(
+                task_id="workflow_recovery",
+                status=TaskStatus.retrying,
+                summary="Resumed the workflow after a service restart.",
+                reason="Persistent task state was recovered before any external write.",
+            )
+            await self._message(
+                run,
+                MessageKind.operation,
+                event.summary,
+                {"event": event.model_dump(mode="json")},
+                role="tool",
+            )
+            self._schedule_execution(
+                run.id,
+                UserIdentity(id=run.user_id, email=""),
+            )
+            recovered += 1
+        return recovered
+
     async def create_conversation(
         self, user: UserIdentity, initial_message: str | None, resilience_demo: bool
     ) -> ConversationSnapshot:
@@ -173,10 +217,13 @@ class Orchestrator:
             f"I created a {run.graph.estimated_steps}-step execution plan.",
             {"graph": run.graph.model_dump(mode="json")},
         )
-        task = asyncio.create_task(self._execute(run.id, user))
+        self._schedule_execution(run.id, user)
+        return run
+
+    def _schedule_execution(self, run_id: UUID, user: UserIdentity) -> None:
+        task = asyncio.create_task(self._execute(run_id, user))
         self.background_tasks.add(task)
         task.add_done_callback(self.background_tasks.discard)
-        return run
 
     async def _execute(self, run_id: UUID, user: UserIdentity) -> None:
         run = await self.store.get_run(run_id, user.id)

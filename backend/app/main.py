@@ -55,6 +55,7 @@ async def lifespan(app: FastAPI):
         TravelToolRegistry(settings),
         calendar,
     )
+    await app.state.orchestrator.recover_pending_runs()
     yield
 
 

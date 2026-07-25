@@ -8,11 +8,14 @@ from app.config import Settings
 from app.interpreter import RequestInterpreter
 from app.models import (
     ApprovalDecision,
+    RunState,
     RunStatus,
     SendMessageRequest,
+    TaskStatus,
     UserIdentity,
 )
 from app.orchestrator import CalendarConnectionRequired, Orchestrator
+from app.planner import build_task_graph
 from app.store import SQLiteStore, TokenCipher
 from app.travel_tools import TravelToolRegistry
 
@@ -149,3 +152,36 @@ async def test_usual_preferences_are_reused_in_a_new_conversation(tmp_path: Path
     assert run.constraints.earliest_departure.hour == 8
     assert run.constraints.hotel_area_preference == "beach"
     assert run.constraints.missing_fields == []
+
+
+async def test_running_workflow_is_resumed_from_persistent_state(tmp_path: Path) -> None:
+    database = tmp_path / "recovery.db"
+    first, user = await build_orchestrator(database)
+    snapshot = await first.create_conversation(user, None, False)
+    constraints = await first.interpreter.interpret(
+        "plan a 3-day trip from Kolkata to Goa next weekend under ₹30,000"
+    )
+    run = RunState(
+        conversation_id=snapshot.conversation.id,
+        user_id=user.id,
+        status=RunStatus.running,
+        constraints=constraints,
+        graph=build_task_graph(constraints),
+    )
+    run.graph.tasks[2].status = TaskStatus.running
+    await first.store.save_run(run)
+
+    recovered, _ = await build_orchestrator(database)
+    assert await recovered.recover_pending_runs() == 1
+    await wait_for_status(
+        recovered,
+        user,
+        snapshot.conversation.id,
+        RunStatus.awaiting_approval,
+    )
+    resumed = await recovered.snapshot(user, snapshot.conversation.id)
+
+    assert any(
+        message.payload.get("event", {}).get("task_id") == "workflow_recovery"
+        for message in resumed.messages
+    )
