@@ -130,7 +130,12 @@ class Orchestrator:
         )
 
     async def handle_message(
-        self, user: UserIdentity, conversation_id: UUID, request: SendMessageRequest
+        self,
+        user: UserIdentity,
+        conversation_id: UUID,
+        request: SendMessageRequest,
+        *,
+        base_constraints_override: TravelConstraints | None = None,
     ) -> RunState:
         conversation = await self.store.get_conversation(conversation_id, user.id)
         if not conversation:
@@ -149,7 +154,7 @@ class Orchestrator:
                 raise RuntimeError("Idempotent message exists without a run")
             return existing_run
 
-        base_constraints = (
+        base_constraints = base_constraints_override or (
             current_run.constraints
             if current_run and current_run.status == RunStatus.awaiting_input
             else None
@@ -411,6 +416,7 @@ class Orchestrator:
                     idempotency_key=f"edit-{run.id}-{hashlib.sha1(decision.edit_message.encode()).hexdigest()}",
                     resilience_demo=run.resilience_demo,
                 ),
+                base_constraints_override=run.constraints,
             )
 
         calendar_status = await self.calendar.status(user.id)

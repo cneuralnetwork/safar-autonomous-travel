@@ -56,6 +56,7 @@ export function AppShell() {
   const [approvalBusy, setApprovalBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [composerText, setComposerText] = useState('');
+  const [editingApproval, setEditingApproval] = useState(false);
   const [resilienceDemo, setResilienceDemo] = useState(false);
   const composerRef = useRef<TextInput>(null);
 
@@ -106,6 +107,15 @@ export function AppShell() {
           );
           setConversationId(created.conversation.id);
           setSnapshot(created);
+        } else if (editingApproval && snapshot?.active_run?.approval) {
+          await api.resolveApproval(
+            accessToken,
+            snapshot.active_run.id,
+            snapshot.active_run.approval,
+            'edit',
+            text,
+          );
+          setEditingApproval(false);
         } else {
           await api.sendMessage(accessToken, conversationId, text, resilienceDemo);
           await refreshSnapshot();
@@ -121,9 +131,11 @@ export function AppShell() {
     [
       accessToken,
       conversationId,
+      editingApproval,
       refreshConversations,
       refreshSnapshot,
       resilienceDemo,
+      snapshot?.active_run,
     ],
   );
 
@@ -146,12 +158,14 @@ export function AppShell() {
       const run = snapshot?.active_run;
       if (!run?.approval) return;
       if (decision === 'edit') {
+        setEditingApproval(true);
         setComposerText('Change the plan: ');
         setTab('plan');
         requestAnimationFrame(() => composerRef.current?.focus());
         return;
       }
       setApprovalBusy(true);
+      setEditingApproval(false);
       try {
         await api.resolveApproval(accessToken, run.id, run.approval, decision);
       } catch (approvalError) {
@@ -191,6 +205,7 @@ export function AppShell() {
     setConversationId(null);
     setSnapshot(null);
     setComposerText('');
+    setEditingApproval(false);
     setTab('plan');
   }, []);
 
@@ -216,6 +231,7 @@ export function AppShell() {
             setResilienceDemo={setResilienceDemo}
             onApproval={resolveApproval}
             approvalBusy={approvalBusy}
+            editingApproval={editingApproval}
           />
         ) : null}
         {tab === 'trips' ? (
@@ -307,6 +323,7 @@ function PlanScreen({
   setResilienceDemo,
   onApproval,
   approvalBusy,
+  editingApproval,
 }: {
   snapshot: ConversationSnapshot | null;
   onSend: (text: string) => Promise<void>;
@@ -319,6 +336,7 @@ function PlanScreen({
   setResilienceDemo: (value: boolean) => void;
   onApproval: (decision: 'approve' | 'edit' | 'cancel') => void;
   approvalBusy: boolean;
+  editingApproval: boolean;
 }) {
   const messages = snapshot?.messages ?? [];
   if (!snapshot) {
@@ -403,7 +421,9 @@ function PlanScreen({
           onSend={onSend}
           busy={sending}
           placeholder={
-            snapshot.active_run?.status === 'awaiting_input'
+            editingApproval
+              ? 'Describe the change…'
+              : snapshot.active_run?.status === 'awaiting_input'
               ? 'Answer Safar…'
               : 'Ask Safar to change anything…'
           }

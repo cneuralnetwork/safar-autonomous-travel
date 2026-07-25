@@ -185,3 +185,43 @@ async def test_running_workflow_is_resumed_from_persistent_state(tmp_path: Path)
         message.payload.get("event", {}).get("task_id") == "workflow_recovery"
         for message in resumed.messages
     )
+
+
+async def test_approval_edit_starts_a_revised_run_with_existing_constraints(
+    tmp_path: Path,
+) -> None:
+    orchestrator, user = await build_orchestrator(tmp_path / "approval-edit.db")
+    snapshot = await orchestrator.create_conversation(
+        user,
+        (
+            "plan a 3-day trip from Kolkata to Goa next weekend under ₹30,000, "
+            "avoid flights before 8 am"
+        ),
+        False,
+    )
+    await wait_for_status(
+        orchestrator,
+        user,
+        snapshot.conversation.id,
+        RunStatus.awaiting_approval,
+    )
+    original = (await orchestrator.snapshot(user, snapshot.conversation.id)).active_run
+    assert original is not None
+    assert original.approval is not None
+
+    revised = await orchestrator.approve(
+        user,
+        original.id,
+        ApprovalDecision(
+            decision="edit",
+            payload_hash=original.approval.payload_hash,
+            edit_message="Increase the budget by ₹5,000",
+        ),
+    )
+
+    assert revised.id != original.id
+    assert revised.constraints.origin == "Kolkata"
+    assert revised.constraints.destination == "Goa"
+    assert revised.constraints.budget == 35_000
+    assert revised.constraints.earliest_departure is not None
+    assert revised.constraints.earliest_departure.hour == 8

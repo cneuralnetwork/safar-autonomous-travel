@@ -65,6 +65,8 @@ class RequestInterpreter:
     ) -> TravelConstraints:
         reference_day = today or date.today()
         deterministic = self._deterministic(text, current, reference_day)
+        if current and self._is_constraint_adjustment(text):
+            return deterministic
         if not self.client:
             return deterministic
         try:
@@ -148,12 +150,21 @@ class RequestInterpreter:
             if destination_only:
                 values["destination"] = self._clean_place(destination_only.group(1))
 
-        budget_match = re.search(
-            r"(?:under|below|budget(?:\s+of)?|within|for)\s*(?:₹|rs\.?|inr)?\s*([\d,]+)",
+        budget_increase = re.search(
+            r"increase\s+(?:the\s+)?budget\s+by\s*(?:₹|rs\.?|inr)?\s*([\d,]+)",
             lower,
-        ) or re.search(r"(?:₹|rs\.?|inr)\s*([\d,]+)", lower)
-        if budget_match:
-            values["budget"] = int(budget_match.group(1).replace(",", ""))
+        )
+        if budget_increase:
+            increment = int(budget_increase.group(1).replace(",", ""))
+            values["budget"] = int(values.get("budget") or 0) + increment
+        else:
+            budget_match = re.search(
+                r"(?:under|below|budget(?:\s+of|\s+to)?|within|for)"
+                r"\s*(?:₹|rs\.?|inr)?\s*([\d,]+)",
+                lower,
+            ) or re.search(r"(?:₹|rs\.?|inr)\s*([\d,]+)", lower)
+            if budget_match:
+                values["budget"] = int(budget_match.group(1).replace(",", ""))
 
         duration_match = re.search(r"\b(\d+)\s*[- ]?\s*day", lower)
         if duration_match:
@@ -185,6 +196,8 @@ class RequestInterpreter:
             if time_match.group(3) == "pm" and hour < 12:
                 hour += 12
             values["earliest_departure"] = time(hour=hour % 24, minute=minute)
+        elif "allow earlier flights" in lower:
+            values["earliest_departure"] = None
 
         if "near the beach" in lower or "near beach" in lower:
             values["hotel_area_preference"] = "beach"
@@ -192,6 +205,13 @@ class RequestInterpreter:
         elif "city centre" in lower or "city center" in lower:
             values["hotel_area_preference"] = "city centre"
             values["max_hotel_distance_km"] = values.get("max_hotel_distance_km") or 3.0
+        elif (
+            "hotel" in lower
+            and ("farther away" in lower or "further away" in lower)
+        ):
+            values["max_hotel_distance_km"] = float(
+                values.get("max_hotel_distance_km") or 3.0
+            ) + 2.0
 
         relative = self._relative_dates(lower, today, values.get("duration_days"))
         if relative:
@@ -286,3 +306,17 @@ class RequestInterpreter:
     @staticmethod
     def _clean_place(value: str) -> str:
         return value.strip(" ,.-").title()
+
+    @staticmethod
+    def _is_constraint_adjustment(text: str) -> bool:
+        lower = text.lower()
+        return any(
+            phrase in lower
+            for phrase in (
+                "increase the budget by",
+                "increase budget by",
+                "allow earlier flights",
+                "farther away",
+                "further away",
+            )
+        )
