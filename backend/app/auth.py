@@ -20,6 +20,21 @@ class AuthConfigurationError(RuntimeError):
     pass
 
 
+def require_google_identity(user: dict[str, Any]) -> dict[str, Any]:
+    """Return the Google identity or reject sessions created by any other provider."""
+    identities = user.get("identities") or []
+    google_identity = next(
+        (item for item in identities if item.get("provider") == "google"),
+        None,
+    )
+    if not google_identity:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only Google-authenticated accounts can use Safar",
+        )
+    return google_identity.get("identity_data") or {}
+
+
 class GoogleAuthStartRequest(BaseModel):
     proof_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
 
@@ -226,9 +241,7 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="Session is invalid or expired")
     user = response.json()
     metadata = user.get("user_metadata") or {}
-    identities = user.get("identities") or []
-    google_identity = next((item for item in identities if item.get("provider") == "google"), {})
-    google_data = google_identity.get("identity_data") or {}
+    google_data = require_google_identity(user)
     return UserIdentity(
         id=str(user["id"]),
         email=user.get("email") or google_data.get("email") or "",
