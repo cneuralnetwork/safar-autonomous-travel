@@ -83,6 +83,7 @@ class GoogleAuthBridge:
         attempt_id = secrets.token_urlsafe(24)
         state_value = secrets.token_urlsafe(32)
         nonce = secrets.token_urlsafe(32)
+        hashed_nonce = hashlib.sha256(nonce.encode()).hexdigest()
         attempt = LoginAttempt(
             id=attempt_id,
             proof_hash=proof_hash,
@@ -98,7 +99,7 @@ class GoogleAuthBridge:
             "response_type": "code",
             "scope": "openid email profile",
             "state": state_value,
-            "nonce": nonce,
+            "nonce": hashed_nonce,
             "access_type": "online",
             "include_granted_scopes": "true",
             "prompt": "select_account",
@@ -137,7 +138,8 @@ class GoogleAuthBridge:
             token_response.raise_for_status()
             google_tokens = token_response.json()
             identity = await self._validate_google_id_token(
-                google_tokens["id_token"], expected_nonce=attempt.nonce
+                google_tokens["id_token"],
+                expected_nonce=hashlib.sha256(attempt.nonce.encode()).hexdigest(),
             )
             session_response = await self.client.post(
                 f"{self.settings.supabase_url.rstrip('/')}/auth/v1/token",

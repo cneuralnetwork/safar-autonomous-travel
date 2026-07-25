@@ -1,5 +1,6 @@
 import hashlib
 import json
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -56,6 +57,10 @@ async def test_google_callback_forwards_the_original_nonce_to_supabase() -> None
     bridge = GoogleAuthBridge(settings)
     start = bridge.start(hashlib.sha256(b"proof").hexdigest())
     attempt = bridge.attempts[start.attempt_id]
+    hashed_nonce = hashlib.sha256(attempt.nonce.encode()).hexdigest()
+
+    authorization_params = parse_qs(urlparse(start.authorization_url).query)
+    assert authorization_params["nonce"] == [hashed_nonce]
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url == httpx.URL("https://oauth2.googleapis.com/token"):
@@ -67,7 +72,7 @@ async def test_google_callback_forwards_the_original_nonce_to_supabase() -> None
                 200,
                 json={
                     "aud": settings.google_client_id,
-                    "nonce": attempt.nonce,
+                    "nonce": hashed_nonce,
                     "email_verified": True,
                     "email": "traveller@example.com",
                     "name": "Safar Traveller",
