@@ -52,6 +52,7 @@ export const MessageRenderer = memo(function MessageRenderer({
         <InterpretationCard
           text={message.text}
           constraints={message.payload.constraints as TravelConstraints}
+          memoryApplied={Boolean(message.payload.memory_applied)}
         />
       );
     case 'clarification':
@@ -128,9 +129,11 @@ function CardHeader({
 function InterpretationCard({
   text,
   constraints,
+  memoryApplied,
 }: {
   text: string;
   constraints?: TravelConstraints;
+  memoryApplied: boolean;
 }) {
   if (!constraints) return <SystemCard text={text} />;
   const chips = [
@@ -151,6 +154,12 @@ function InterpretationCard({
     <View style={styles.card}>
       <CardHeader icon="sparkles" eyebrow="I understood" title="Your trip brief" />
       <Text style={styles.body}>{text}</Text>
+      {memoryApplied ? (
+        <View style={styles.memoryNotice}>
+          <Ionicons name="time-outline" size={15} color={colors.blue} />
+          <Text style={styles.memoryNoticeText}>Usual preferences applied</Text>
+        </View>
+      ) : null}
       <View style={styles.chipWrap}>
         {chips.map((chip) => (
           <View key={chip} style={styles.chip}>
@@ -583,6 +592,17 @@ const styles = StyleSheet.create({
   eyebrow: { ...type.caption, color: colors.muted, textTransform: 'uppercase', letterSpacing: 0.8 },
   cardTitle: { ...type.section, color: colors.ink },
   body: { ...type.body, color: colors.muted },
+  memoryNotice: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+    borderRadius: radius.small,
+    backgroundColor: colors.blueSoft,
+  },
+  memoryNoticeText: { ...type.caption, color: '#0877A6' },
   chipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   chip: {
     paddingHorizontal: 11,
@@ -817,4 +837,3 @@ const styles = StyleSheet.create({
   errorDot: { backgroundColor: colors.coral },
   pressed: { opacity: 0.72, transform: [{ scale: 0.98 }] },
 });
-

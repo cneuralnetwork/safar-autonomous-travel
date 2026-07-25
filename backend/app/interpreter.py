@@ -138,6 +138,15 @@ class RequestInterpreter:
         elif second:
             values["destination"] = self._clean_place(second.group(1))
             values["origin"] = self._clean_place(second.group(2))
+        else:
+            destination_only = re.search(
+                r"\b(?:trip|travel|go|going)\s+to\s+([a-zA-Z ]+?)"
+                r"(?=\s+(?:for|under|on|next|this|with|and|from)\b|[,.]|$)",
+                cleaned,
+                flags=re.IGNORECASE,
+            )
+            if destination_only:
+                values["destination"] = self._clean_place(destination_only.group(1))
 
         budget_match = re.search(
             r"(?:under|below|budget(?:\s+of)?|within|for)\s*(?:₹|rs\.?|inr)?\s*([\d,]+)",

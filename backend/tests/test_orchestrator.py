@@ -117,3 +117,35 @@ async def test_message_idempotency_does_not_create_second_run(tmp_path: Path) ->
     user_messages = [message for message in persisted.messages if message.role == "user"]
     assert len(user_messages) == 1
     assert user_messages[0].run_id == first.id
+
+
+async def test_usual_preferences_are_reused_in_a_new_conversation(tmp_path: Path) -> None:
+    orchestrator, user = await build_orchestrator(tmp_path / "preferences.db")
+    first = await orchestrator.create_conversation(
+        user,
+        (
+            "plan a 3-day trip from Kolkata to Goa next weekend for two people "
+            "under ₹30,000, avoid flights before 8 am and stay near the beach"
+        ),
+        False,
+    )
+    assert first.active_run is not None
+
+    second = await orchestrator.create_conversation(
+        user,
+        (
+            "plan another 3-day trip to Jaipur next weekend under ₹35,000 "
+            "with my usual preferences"
+        ),
+        False,
+    )
+
+    run = second.active_run
+    assert run is not None
+    assert run.constraints.origin == "Kolkata"
+    assert run.constraints.origin_airport == "CCU"
+    assert run.constraints.destination == "Jaipur"
+    assert run.constraints.earliest_departure is not None
+    assert run.constraints.earliest_departure.hour == 8
+    assert run.constraints.hotel_area_preference == "beach"
+    assert run.constraints.missing_fields == []

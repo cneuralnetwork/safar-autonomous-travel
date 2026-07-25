@@ -26,6 +26,7 @@ from app.models import (
     TaskStatus,
     TravelConstraints,
     UserIdentity,
+    UserPreferences,
     utc_now,
 )
 from app.planner import build_task_graph
@@ -109,6 +110,12 @@ class Orchestrator:
             if current_run and current_run.status == RunStatus.awaiting_input
             else None
         )
+        memory_applied = False
+        if base_constraints is None and "usual preference" in request.text.lower():
+            preferences = await self.store.get_user_preferences(user.id)
+            if preferences:
+                base_constraints = self._constraints_from_preferences(preferences)
+                memory_applied = True
         constraints = await self.interpreter.interpret(request.text, base_constraints)
         run = (
             current_run
@@ -142,6 +149,7 @@ class Orchestrator:
             {
                 "constraints": constraints.model_dump(mode="json"),
                 "missing_fields": constraints.missing_fields,
+                "memory_applied": memory_applied,
             },
         )
         if constraints.missing_fields:
@@ -155,6 +163,7 @@ class Orchestrator:
             )
             return run
 
+        await self._remember_preferences(user.id, constraints)
         run.graph = build_task_graph(constraints)
         run.status = RunStatus.planned
         await self.store.save_run(run)
@@ -604,3 +613,79 @@ class Orchestrator:
             f"a hard constraint. The most common conflict was: {common}. "
             "Which constraint may I change?"
         )
+
+    @staticmethod
+    def _constraints_from_preferences(preferences: UserPreferences) -> TravelConstraints:
+        saved = preferences.preferences
+        return TravelConstraints(
+            origin=preferences.home_city,
+            origin_airport=preferences.preferred_airport,
+            earliest_departure=(
+                datetime.strptime(
+                    str(saved.get("earliest_departure", "08:00")),
+                    "%H:%M",
+                ).time()
+                if preferences.avoid_early_flights
+                else None
+            ),
+            hotel_area_preference=preferences.hotel_preference,
+            max_hotel_distance_km=saved.get("max_hotel_distance_km"),
+            preferences=list(saved.get("preferences", [])),
+            inferred_fields=[
+                field
+                for field, value in {
+                    "origin": preferences.home_city,
+                    "origin_airport": preferences.preferred_airport,
+                    "earliest_departure": preferences.avoid_early_flights,
+                    "hotel_area_preference": preferences.hotel_preference,
+                }.items()
+                if value
+            ],
+        )
+
+    async def _remember_preferences(
+        self, user_id: str, constraints: TravelConstraints
+    ) -> None:
+        existing = await self.store.get_user_preferences(user_id)
+        preferences = UserPreferences(
+            user_id=user_id,
+            home_city=(
+                existing.home_city
+                if existing and existing.home_city
+                else constraints.origin
+            ),
+            preferred_airport=(
+                existing.preferred_airport
+                if existing and existing.preferred_airport
+                else constraints.origin_airport
+            ),
+            avoid_early_flights=bool(
+                constraints.earliest_departure
+                or (existing and existing.avoid_early_flights)
+            ),
+            hotel_preference=(
+                constraints.hotel_area_preference
+                or (existing.hotel_preference if existing else None)
+            ),
+            preferences={
+                "earliest_departure": (
+                    constraints.earliest_departure.strftime("%H:%M")
+                    if constraints.earliest_departure
+                    else (existing.preferences.get("earliest_departure") if existing else None)
+                ),
+                "max_hotel_distance_km": (
+                    constraints.max_hotel_distance_km
+                    if constraints.max_hotel_distance_km is not None
+                    else (
+                        existing.preferences.get("max_hotel_distance_km")
+                        if existing
+                        else None
+                    )
+                ),
+                "preferences": sorted(
+                    set(constraints.preferences)
+                    | set(existing.preferences.get("preferences", []) if existing else [])
+                ),
+            },
+        )
+        await self.store.save_user_preferences(preferences)

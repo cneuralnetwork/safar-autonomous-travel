@@ -56,6 +56,16 @@ class UserIdentity(BaseModel):
     google_sub: str | None = None
 
 
+class UserPreferences(BaseModel):
+    user_id: str
+    home_city: str | None = None
+    preferred_airport: str | None = None
+    avoid_early_flights: bool = False
+    hotel_preference: str | None = None
+    preferences: dict[str, Any] = Field(default_factory=dict)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
 class TravelConstraints(BaseModel):
     task_type: Literal["travel_planning"] = "travel_planning"
     origin: str | None = None

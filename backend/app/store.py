@@ -11,7 +11,7 @@ import httpx
 from cryptography.fernet import Fernet
 
 from app.config import Settings
-from app.models import ChatMessage, Conversation, RunState
+from app.models import ChatMessage, Conversation, RunState, UserPreferences
 
 
 class StoreError(RuntimeError):
@@ -71,6 +71,12 @@ class Store(ABC):
     @abstractmethod
     async def delete_calendar_connection(self, user_id: str) -> None: ...
 
+    @abstractmethod
+    async def get_user_preferences(self, user_id: str) -> UserPreferences | None: ...
+
+    @abstractmethod
+    async def save_user_preferences(self, preferences: UserPreferences) -> None: ...
+
 
 class SQLiteStore(Store):
     def __init__(self, path: str) -> None:
@@ -119,6 +125,12 @@ class SQLiteStore(Store):
                     on runs(conversation_id, updated_at desc);
 
                 create table if not exists calendar_connections (
+                    user_id text primary key,
+                    payload text not null,
+                    updated_at text not null
+                );
+
+                create table if not exists user_preferences (
                     user_id text primary key,
                     payload text not null,
                     updated_at text not null
@@ -307,6 +319,32 @@ class SQLiteStore(Store):
     async def delete_calendar_connection(self, user_id: str) -> None:
         with self._connect() as db:
             db.execute("delete from calendar_connections where user_id = ?", (user_id,))
+
+    async def get_user_preferences(self, user_id: str) -> UserPreferences | None:
+        with self._connect() as db:
+            cursor = db.execute(
+                "select payload from user_preferences where user_id = ?",
+                (user_id,),
+            )
+            row = cursor.fetchone()
+        return UserPreferences.model_validate_json(row[0]) if row else None
+
+    async def save_user_preferences(self, preferences: UserPreferences) -> None:
+        with self._connect() as db:
+            db.execute(
+                """
+                insert into user_preferences(user_id, payload, updated_at)
+                values (?, ?, ?)
+                on conflict(user_id) do update set
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    preferences.user_id,
+                    preferences.model_dump_json(),
+                    preferences.updated_at.isoformat(),
+                ),
+            )
 
 
 class SupabaseStore(Store):
@@ -547,6 +585,22 @@ class SupabaseStore(Store):
             "oauth_tokens",
             params={"user_id": f"eq.{user_id}", "provider": "eq.google_calendar"},
             prefer="return=minimal",
+        )
+
+    async def get_user_preferences(self, user_id: str) -> UserPreferences | None:
+        rows = await self._request(
+            "GET",
+            "user_preferences",
+            params={"select": "*", "user_id": f"eq.{user_id}", "limit": "1"},
+        )
+        return UserPreferences.model_validate(rows[0]) if rows else None
+
+    async def save_user_preferences(self, preferences: UserPreferences) -> None:
+        await self._request(
+            "POST",
+            "user_preferences",
+            json_body=preferences.model_dump(mode="json"),
+            prefer="return=minimal,resolution=merge-duplicates",
         )
 
 
