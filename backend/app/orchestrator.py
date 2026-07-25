@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import re
 import socket
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -12,7 +13,6 @@ from uuid import UUID
 import httpx
 
 from app.agent_model import ModelMetrics, ReplanDecision, SarvamModelError
-from app.calendar_service import CalendarService
 from app.interpreter import RequestInterpreter
 from app.itinerary import create_itinerary
 from app.models import (
@@ -24,15 +24,19 @@ from app.models import (
     Conversation,
     ConversationSnapshot,
     ExecutionReport,
+    FlightLegOption,
+    HotelOption,
     MessageKind,
     ModelCallRecord,
     OperationEvent,
     RunState,
     RunStatus,
+    SelectionKind,
     SendMessageRequest,
     TaskNode,
     TaskStatus,
     TravelConstraints,
+    TripSelectionRequest,
     UserIdentity,
     UserPreferences,
     utc_now,
@@ -45,11 +49,8 @@ from app.travel_tools import (
     TemporaryToolError,
     ToolError,
     TravelToolRegistry,
+    combine_flight_legs,
 )
-
-
-class CalendarConnectionRequired(RuntimeError):
-    pass
 
 
 class Orchestrator:
@@ -58,13 +59,11 @@ class Orchestrator:
         store: Store,
         interpreter: RequestInterpreter,
         tools: TravelToolRegistry,
-        calendar: CalendarService,
     ) -> None:
         self.store = store
         self.interpreter = interpreter
         self.agent = interpreter.agent
         self.tools = tools
-        self.calendar = calendar
         self.worker_id = f"{socket.gethostname()}:{os.getpid()}"
         self.background_tasks: set[asyncio.Task[Any]] = set()
 
@@ -80,8 +79,18 @@ class Orchestrator:
         for run in await self.store.list_recoverable_runs():
             if not run.graph:
                 continue
+            legacy_graph = not self._task_or_none(run, "outbound_flight_search")
+            if legacy_graph:
+                run.graph = build_task_graph(run.constraints)
+            run.harness_version = 3
             for task in run.graph.tasks:
                 if task.id in {"understand_request", "resolve_constraints"}:
+                    continue
+                if not legacy_graph and task.status not in {
+                    TaskStatus.running,
+                    TaskStatus.retrying,
+                    TaskStatus.failed,
+                }:
                     continue
                 task.status = TaskStatus.waiting
                 task.attempts = 0
@@ -92,13 +101,20 @@ class Orchestrator:
                 task.completed_at = None
             run.status = RunStatus.planned
             run.phase = AgentPhase.executing
-            run.flights = []
-            run.hotels = []
-            run.places = []
-            run.packages = []
-            run.selected_package = None
-            run.itinerary = None
-            run.approval = None
+            if legacy_graph:
+                run.outbound_flights = []
+                run.return_flights = []
+                run.selected_outbound_id = None
+                run.selected_return_id = None
+                run.selected_hotel_id = None
+                run.selection_stage = None
+                run.flights = []
+                run.hotels = []
+                run.places = []
+                run.packages = []
+                run.selected_package = None
+                run.itinerary = None
+                run.approval = None
             await self.store.save_run(run)
             await self._persist_graph(run)
             event = OperationEvent(
@@ -173,9 +189,24 @@ class Orchestrator:
                 raise RuntimeError("Idempotent message exists without a run")
             return existing_run
 
+        if (
+            current_run
+            and current_run.graph
+            and current_run.status in {RunStatus.awaiting_input, RunStatus.awaiting_approval}
+        ):
+            selection = self._selection_from_text(current_run, request.text)
+            if selection:
+                kind, option_id = selection
+                return await self.select_option(
+                    user,
+                    current_run.id,
+                    TripSelectionRequest(kind=kind, option_id=option_id),
+                )
+
         base_constraints = base_constraints_override or (
             current_run.constraints
-            if current_run and current_run.status == RunStatus.awaiting_input
+            if current_run
+            and current_run.status in {RunStatus.awaiting_input, RunStatus.awaiting_approval}
             else None
         )
         memory_applied = False
@@ -197,7 +228,7 @@ class Orchestrator:
             else RunState(
                 conversation_id=conversation_id,
                 user_id=user.id,
-                harness_version=2,
+                harness_version=3,
                 resilience_demo=bool(request.resilience_demo),
             )
         )
@@ -224,9 +255,7 @@ class Orchestrator:
                 request.text,
                 base_constraints,
                 preferences=(
-                    saved_preferences.model_dump(mode="json")
-                    if saved_preferences
-                    else {}
+                    saved_preferences.model_dump(mode="json") if saved_preferences else {}
                 ),
                 recent_messages=[
                     {"role": message.role, "content": message.text}
@@ -255,14 +284,13 @@ class Orchestrator:
             await self._record_model_call(run, interpretation.model_metrics)
         constraints = interpretation.constraints
         run.constraints = constraints
-        run.assumptions = list(
-            dict.fromkeys([*run.assumptions, *interpretation.assumptions])
-        )
+        run.assumptions = list(dict.fromkeys([*run.assumptions, *interpretation.assumptions]))
         await self.store.save_run(run)
         conversation.last_message = request.text
         conversation.updated_at = utc_now()
         if constraints.destination:
             conversation.destination = constraints.destination
+            conversation.visual_theme = constraints.visual_theme
             conversation.title = f"{constraints.destination} trip"
         await self.store.update_conversation(conversation)
 
@@ -276,9 +304,7 @@ class Orchestrator:
                 "memory_applied": memory_applied,
                 "assumptions": interpretation.assumptions,
                 "model": (
-                    interpretation.model_metrics.model
-                    if interpretation.model_metrics
-                    else None
+                    interpretation.model_metrics.model if interpretation.model_metrics else None
                 ),
             },
         )
@@ -292,8 +318,7 @@ class Orchestrator:
                 self._clarification(constraints),
                 {
                     "quick_replies": (
-                        interpretation.quick_replies
-                        or self._quick_replies(constraints)
+                        interpretation.quick_replies or self._quick_replies(constraints)
                     )
                 },
             )
@@ -328,17 +353,18 @@ class Orchestrator:
                 run.graph = build_task_graph(constraints)
         except SarvamModelError as error:
             await self._record_model_call(run, error.metrics)
-            run.status = RunStatus.paused
-            run.phase = AgentPhase.paused
-            run.errors.append(str(error))
-            await self.store.save_run(run)
-            await self._message(
-                run,
-                MessageKind.error,
-                "Sarvam could not produce a valid execution plan after automatic retries.",
-                {"error_code": error.metrics.error_code, "recoverable": True},
+            run.assumptions = list(
+                dict.fromkeys(
+                    [
+                        *run.assumptions,
+                        (
+                            "Safar used its validated fallback workflow after "
+                            "the model plan ended early."
+                        ),
+                    ]
+                )
             )
-            return run
+            run.graph = build_task_graph(constraints)
 
         run.status = RunStatus.planned
         run.phase = AgentPhase.executing
@@ -408,35 +434,78 @@ class Orchestrator:
                     "Airport identifiers were resolved by the controlled location registry",
                 )
 
-            flights_task = asyncio.create_task(
-                self._run_search_task(run, "flight_search", "search_flights")
-            )
-            hotels_task = asyncio.create_task(
-                self._run_search_task(run, "hotel_search", "search_hotels")
-            )
-            places_task = asyncio.create_task(self._run_places_task(run))
-            run.flights, run.hotels, run.places = await asyncio.gather(
-                flights_task,
-                hotels_task,
-                places_task,
-            )
-            await self.store.save_run(run)
-            await self._message(
-                run,
-                MessageKind.flight_options,
-                f"Shortlisted {len(run.flights)} flight options.",
-                {"flights": [item.model_dump(mode="json") for item in run.flights[:6]]},
-            )
-            await self._message(
-                run,
-                MessageKind.hotel_options,
-                f"Shortlisted {len(run.hotels)} available hotels.",
-                {"hotels": [item.model_dump(mode="json") for item in run.hotels[:6]]},
-            )
+            if not run.outbound_flights:
+                run.outbound_flights = await self._run_search_task(
+                    run,
+                    "outbound_flight_search",
+                    "search_outbound_flights",
+                )
+                run.outbound_flights = self._filter_flight_options(
+                    run.outbound_flights,
+                    run.constraints,
+                )
+                if not run.outbound_flights:
+                    raise NoResultsError("No outbound flights match the requested departure time")
+                await self.store.save_run(run)
+                await self._await_selection(run, "outbound_flight")
+                return False
+            if not self._selected_outbound(run):
+                run.selected_outbound_id = None
+                await self._await_selection(run, "outbound_flight")
+                return False
+
+            if not run.return_flights:
+                run.return_flights = await self._run_search_task(
+                    run,
+                    "return_flight_search",
+                    "search_return_flights",
+                )
+                run.return_flights = self._filter_flight_options(
+                    run.return_flights,
+                    run.constraints,
+                )
+                if not run.return_flights:
+                    raise NoResultsError("No return flights match the requested departure time")
+                await self.store.save_run(run)
+                await self._await_selection(run, "return_flight")
+                return False
+            if not self._selected_return(run):
+                run.selected_return_id = None
+                await self._await_selection(run, "return_flight")
+                return False
+
+            if not run.hotels:
+                run.hotels = await self._run_search_task(
+                    run,
+                    "hotel_search",
+                    "search_hotels",
+                )
+                run.hotels = [hotel for hotel in run.hotels if hotel.available]
+                if not run.hotels:
+                    raise NoResultsError("No available stays matched the trip")
+                await self.store.save_run(run)
+                await self._await_selection(run, "hotel")
+                return False
+            if not self._selected_hotel(run):
+                run.selected_hotel_id = None
+                await self._await_selection(run, "hotel")
+                return False
+
+            if not run.places:
+                run.places = await self._run_places_task(run)
+                await self.store.save_run(run)
+
+            outbound = self._selected_outbound(run)
+            inbound = self._selected_return(run)
+            hotel = self._selected_hotel(run)
+            if not outbound or not inbound or not hotel:
+                raise ValueError("A selected travel option is no longer available")
+            combined_flight = combine_flight_legs(outbound, inbound)
+            run.flights = [combined_flight]
 
             compare_task = self._task(run, "compare_packages")
             await self._start_task(run, compare_task)
-            solver_result = compare_packages(run.flights, run.hotels, run.constraints)
+            solver_result = compare_packages([combined_flight], [hotel], run.constraints)
             if not solver_result.valid:
                 fallback_reason = self._impossible_budget_message(
                     run.constraints,
@@ -470,9 +539,10 @@ class Orchestrator:
                                 decision.quick_replies
                                 if decision and decision.quick_replies
                                 else [
+                                    "Change outbound to option 1",
+                                    "Change return to option 1",
+                                    "Change stay to option 1",
                                     "Increase the budget by ₹5,000",
-                                    "Show hotels a little farther away",
-                                    "Allow earlier flights",
                                 ]
                             )
                         ][:4],
@@ -485,31 +555,23 @@ class Orchestrator:
             await self._complete_task(
                 run,
                 compare_task,
-                f"Compared {len(run.flights) * len(run.hotels)} combinations",
-                (
-                    f"Selected the highest-ranked package; "
-                    f"{solver_result.rejected_count} combinations violated constraints"
-                ),
+                "Validated your three selected options",
+                "The chosen outbound flight, return flight, and stay satisfy the hard constraints",
             )
             await self._message(
                 run,
                 MessageKind.budget,
                 (
                     (
-                        f"The best valid package is ₹{run.selected_package.total_price:,}, "
+                        f"Your selected trip is ₹{run.selected_package.total_price:,}, "
                         f"leaving ₹{run.selected_package.remaining_budget:,}."
                     )
                     if run.selected_package.remaining_budget is not None
-                    else (
-                        f"The best-ranked package is "
-                        f"₹{run.selected_package.total_price:,}."
-                    )
+                    else (f"Your selected trip is ₹{run.selected_package.total_price:,}.")
                 ),
                 {
                     "selected_package": run.selected_package.model_dump(mode="json"),
-                    "alternatives": [
-                        package.model_dump(mode="json") for package in run.packages[1:4]
-                    ],
+                    "alternatives": [],
                     "rejected_count": solver_result.rejected_count,
                     "rejection_summary": solver_result.rejection_summary,
                 },
@@ -554,14 +616,14 @@ class Orchestrator:
                 run,
                 event_type="approval_required",
                 status="awaiting_approval",
-                summary=f"Waiting for approval to add {event_count} Calendar events.",
+                summary=f"Calendar file ready with {event_count} trip events.",
                 task_id=approval_task.id,
                 payload={"approval": run.approval.model_dump(mode="json")},
             )
             await self._message(
                 run,
                 MessageKind.approval,
-                f"Ready to add {event_count} events to Google Calendar.",
+                f"Ready to export {event_count} events as a portable calendar file.",
                 {"approval": run.approval.model_dump(mode="json")},
             )
             return False
@@ -579,14 +641,14 @@ class Orchestrator:
                     "after retries and fallbacks. Change a constraint and I’ll try again."
                 ),
             )
-            if (
-                decision
-                and decision.action in {"retry", "switch_provider"}
-                and run.replans <= 3
-            ):
-                for task_id in ("flight_search", "hotel_search"):
+            if decision and decision.action in {"retry", "switch_provider"} and run.replans <= 3:
+                for task_id in (
+                    "outbound_flight_search",
+                    "return_flight_search",
+                    "hotel_search",
+                ):
                     task = self._task_or_none(run, task_id)
-                    if task:
+                    if task and task.status == TaskStatus.failed:
                         task.status = TaskStatus.waiting
                         task.reason = None
                         task.completed_at = None
@@ -653,6 +715,291 @@ class Orchestrator:
             )
             return False
 
+    async def select_option(
+        self,
+        user: UserIdentity,
+        run_id: UUID,
+        request: TripSelectionRequest,
+    ) -> RunState:
+        run = await self.store.get_run(run_id, user.id)
+        if not run or not run.graph:
+            raise LookupError("Trip selection request not found")
+        if run.status not in {RunStatus.awaiting_input, RunStatus.awaiting_approval}:
+            raise ValueError("Safar is not waiting for a travel choice")
+
+        options = self._selection_options(run, request.kind)
+        selected = next(
+            (option for option in options if option.id == request.option_id),
+            None,
+        )
+        if not selected:
+            raise ValueError("That option is no longer available")
+
+        previous_stage = run.selection_stage
+        if request.kind == "outbound_flight":
+            run.selected_outbound_id = selected.id
+            task_id = "choose_outbound_flight"
+            label = self._flight_label(selected)
+            noun = "flight there"
+        elif request.kind == "return_flight":
+            run.selected_return_id = selected.id
+            task_id = "choose_return_flight"
+            label = self._flight_label(selected)
+            noun = "flight back"
+        else:
+            run.selected_hotel_id = selected.id
+            task_id = "choose_hotel"
+            label = selected.name
+            noun = "stay"
+
+        selection_task = self._task(run, task_id)
+        selection_task.status = TaskStatus.completed
+        selection_task.summary = f"Selected {label}"
+        selection_task.reason = "Chosen by the traveller; it can still be changed in chat"
+        selection_task.completed_at = utc_now()
+        await self.store.save_task(run, selection_task)
+
+        self._invalidate_final_plan(run)
+        for downstream_id in (
+            "compare_packages",
+            "create_itinerary",
+            "request_approval",
+            "add_calendar",
+            "create_report",
+        ):
+            downstream = self._task_or_none(run, downstream_id)
+            if downstream:
+                await self.store.save_task(run, downstream)
+        if previous_stage == request.kind:
+            run.selection_stage = None
+        else:
+            run.selection_stage = previous_stage
+        run.status = RunStatus.planned
+        run.phase = AgentPhase.executing
+        await self.store.save_run(run)
+        await self._event(
+            run,
+            event_type="option_selected",
+            status="completed",
+            summary=f"Traveller selected {label}.",
+            task_id=task_id,
+            payload={
+                "kind": request.kind,
+                "option_id": selected.id,
+                "label": label,
+            },
+        )
+        await self._message(
+            run,
+            MessageKind.selection_confirmation,
+            (
+                f"Got it — {label} is your {noun}. "
+                "You can change it here any time before final approval."
+            ),
+            {
+                "kind": request.kind,
+                "option_id": selected.id,
+                "label": label,
+            },
+        )
+        self._schedule_execution(run.id, user)
+        return run
+
+    async def _await_selection(
+        self,
+        run: RunState,
+        kind: SelectionKind,
+    ) -> None:
+        if kind == "outbound_flight":
+            task_id = "choose_outbound_flight"
+            message_kind = MessageKind.flight_selection
+            options = run.outbound_flights[:6]
+            text = "Choose your flight there. Tap an option or tell me your choice in chat."
+            payload = {
+                "leg": "outbound",
+                "selection_kind": kind,
+                "flights": [option.model_dump(mode="json") for option in options],
+            }
+        elif kind == "return_flight":
+            task_id = "choose_return_flight"
+            message_kind = MessageKind.flight_selection
+            options = run.return_flights[:6]
+            text = "Now choose your flight back. This is a separate live search."
+            payload = {
+                "leg": "return",
+                "selection_kind": kind,
+                "flights": [option.model_dump(mode="json") for option in options],
+            }
+        else:
+            task_id = "choose_hotel"
+            message_kind = MessageKind.hotel_selection
+            options = run.hotels[:6]
+            text = "Choose where you want to stay. You can tap a card or name it in chat."
+            payload = {
+                "selection_kind": kind,
+                "hotels": [option.model_dump(mode="json") for option in options],
+            }
+
+        task = self._task(run, task_id)
+        task.status = TaskStatus.awaiting_input
+        task.started_at = task.started_at or utc_now()
+        task.summary = "Waiting for your choice"
+        task.reason = "Safar will not choose this travel option on your behalf"
+        run.selection_stage = kind
+        run.status = RunStatus.awaiting_input
+        run.phase = AgentPhase.awaiting_input
+        await self.store.save_task(run, task)
+        await self.store.save_run(run)
+        await self._event(
+            run,
+            event_type="selection_required",
+            status="awaiting_input",
+            summary=text,
+            task_id=task_id,
+            payload={"kind": kind, "option_count": len(options)},
+        )
+        await self._message(run, message_kind, text, payload)
+
+    @staticmethod
+    def _filter_flight_options(
+        options: list[FlightLegOption],
+        constraints: TravelConstraints,
+    ) -> list[FlightLegOption]:
+        return [
+            option
+            for option in options
+            if (
+                not constraints.earliest_departure
+                or option.departure_at.time() >= constraints.earliest_departure
+            )
+            and (
+                not constraints.latest_departure
+                or option.departure_at.time() <= constraints.latest_departure
+            )
+        ]
+
+    @staticmethod
+    def _selected_outbound(run: RunState) -> FlightLegOption | None:
+        return next(
+            (option for option in run.outbound_flights if option.id == run.selected_outbound_id),
+            None,
+        )
+
+    @staticmethod
+    def _selected_return(run: RunState) -> FlightLegOption | None:
+        return next(
+            (option for option in run.return_flights if option.id == run.selected_return_id),
+            None,
+        )
+
+    @staticmethod
+    def _selected_hotel(run: RunState) -> HotelOption | None:
+        return next(
+            (hotel for hotel in run.hotels if hotel.id == run.selected_hotel_id),
+            None,
+        )
+
+    @staticmethod
+    def _selection_options(
+        run: RunState,
+        kind: SelectionKind,
+    ) -> list[FlightLegOption] | list[HotelOption]:
+        if kind == "outbound_flight":
+            return run.outbound_flights
+        if kind == "return_flight":
+            return run.return_flights
+        return run.hotels
+
+    @staticmethod
+    def _flight_label(option: FlightLegOption) -> str:
+        first = option.segments[0]
+        flight_number = f" {first.flight_number}" if first.flight_number else ""
+        return f"{first.airline}{flight_number} at {first.departure_at.strftime('%-I:%M %p')}"
+
+    @staticmethod
+    def _invalidate_final_plan(run: RunState) -> None:
+        run.flights = []
+        run.packages = []
+        run.selected_package = None
+        run.itinerary = None
+        run.approval = None
+        run.calendar_event_links = []
+        run.completed_at = None
+        for task_id in (
+            "compare_packages",
+            "create_itinerary",
+            "request_approval",
+            "add_calendar",
+            "create_report",
+        ):
+            task = Orchestrator._task_or_none(run, task_id)
+            if task:
+                task.status = TaskStatus.waiting
+                task.summary = None
+                task.reason = None
+                task.started_at = None
+                task.completed_at = None
+
+    def _selection_from_text(
+        self,
+        run: RunState,
+        text: str,
+    ) -> tuple[SelectionKind, str] | None:
+        normalized = " ".join(text.lower().split())
+        kind: SelectionKind | None = None
+        if re.search(r"\b(return|inbound|flight back|coming back)\b", normalized):
+            kind = "return_flight"
+        elif re.search(r"\b(outbound|departure|flight there|going flight)\b", normalized):
+            kind = "outbound_flight"
+        elif re.search(r"\b(hotel|stay|room|property)\b", normalized):
+            kind = "hotel"
+        elif run.selection_stage:
+            kind = run.selection_stage
+        if not kind:
+            return None
+
+        options = self._selection_options(run, kind)
+        if not options:
+            return None
+        if re.search(r"\b(cheapest|lowest price|least expensive)\b", normalized):
+            selected = min(options, key=lambda option: option.total_price)
+            return kind, selected.id
+
+        index: int | None = None
+        numeric = re.search(r"(?:option|choice)\s*#?\s*(\d+)", normalized)
+        if numeric:
+            index = int(numeric.group(1)) - 1
+        else:
+            ordinals = {
+                "first": 0,
+                "second": 1,
+                "third": 2,
+                "fourth": 3,
+                "fifth": 4,
+                "sixth": 5,
+            }
+            index = next(
+                (
+                    value
+                    for word, value in ordinals.items()
+                    if re.search(rf"\b{word}\b", normalized)
+                ),
+                None,
+            )
+        if index is not None and 0 <= index < len(options):
+            return kind, options[index].id
+
+        for option in options:
+            if isinstance(option, HotelOption):
+                searchable = [option.name, option.address]
+            else:
+                searchable = [segment.airline for segment in option.segments] + [
+                    segment.flight_number or "" for segment in option.segments
+                ]
+            if any(value and value.lower() in normalized for value in searchable):
+                return kind, option.id
+        return None
+
     async def approve(
         self, user: UserIdentity, run_id: UUID, decision: ApprovalDecision
     ) -> RunState:
@@ -668,7 +1015,7 @@ class Orchestrator:
         approval_task = self._task(run, "request_approval")
         if decision.decision == "cancel":
             approval_task.status = TaskStatus.completed
-            approval_task.summary = "User cancelled Calendar creation"
+            approval_task.summary = "User skipped the calendar file export"
             self._task(run, "add_calendar").status = TaskStatus.skipped
             run.status = RunStatus.completed
             run.phase = AgentPhase.completed
@@ -677,8 +1024,8 @@ class Orchestrator:
             await self._message(
                 run,
                 MessageKind.calendar,
-                "Calendar creation was cancelled. Your trip plan is still saved.",
-                {"created": 0},
+                "Calendar export was skipped. Your trip plan is still saved.",
+                {"created": 0, "format": "ics"},
             )
             await self._finalize_report(run)
             return run
@@ -701,22 +1048,17 @@ class Orchestrator:
                 base_constraints_override=run.constraints,
             )
 
-        calendar_status = await self.calendar.status(user.id)
-        if not calendar_status["connected"]:
-            raise CalendarConnectionRequired("Connect Google Calendar, then approve again")
         approval_task.status = TaskStatus.completed
-        approval_task.summary = "User explicitly approved Calendar creation"
+        approval_task.summary = "User requested a portable calendar file"
         approval_task.completed_at = utc_now()
         calendar_task = self._task(run, "add_calendar")
         await self._start_task(run, calendar_task)
-        run.calendar_event_links = await self.calendar.create_itinerary_events(
-            user.id, str(run.id), run.itinerary
-        )
+        run.calendar_event_links = []
         await self._complete_task(
             run,
             calendar_task,
-            f"Created {len(run.calendar_event_links)} Google Calendar events",
-            "Only the approved itinerary payload was written",
+            f"Prepared {run.approval.event_count} events for calendar export",
+            "The portable file is generated on the user’s device",
         )
         run.status = RunStatus.completed
         run.phase = AgentPhase.finalizing
@@ -725,8 +1067,12 @@ class Orchestrator:
         await self._message(
             run,
             MessageKind.calendar,
-            f"Added {len(run.calendar_event_links)} events to Google Calendar.",
-            {"links": run.calendar_event_links},
+            "Your portable calendar file is ready to download.",
+            {
+                "created": run.approval.event_count,
+                "format": "ics",
+                "links": [],
+            },
         )
         await self._finalize_report(run)
         run.phase = AgentPhase.completed
@@ -824,7 +1170,7 @@ class Orchestrator:
                 try:
                     if (
                         run.resilience_demo
-                        and task_id == "flight_search"
+                        and task_id == "outbound_flight_search"
                         and provider_index == 0
                         and attempt == 0
                     ):
@@ -834,6 +1180,15 @@ class Orchestrator:
                         results = await self.tools.enrich_hotel_distances(
                             results,
                             run.constraints,
+                        )
+                    if task_id in {
+                        "outbound_flight_search",
+                        "return_flight_search",
+                        "hotel_search",
+                    }:
+                        results = sorted(
+                            results,
+                            key=lambda option: option.total_price,
                         )
                     await self._complete_task(
                         run,
@@ -980,11 +1335,7 @@ class Orchestrator:
         await self.store.save_run(run)
         await self._event(
             run,
-            event_type=(
-                "model_completed"
-                if metrics.status == "completed"
-                else "model_failed"
-            ),
+            event_type=("model_completed" if metrics.status == "completed" else "model_failed"),
             status=metrics.status,
             summary=(
                 f"Sarvam completed {metrics.phase} in {metrics.latency_ms / 1000:.1f}s."

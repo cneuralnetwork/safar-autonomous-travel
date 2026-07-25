@@ -7,6 +7,9 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+VisualTheme = Literal["coast", "mountains", "heritage", "nature", "city"]
+SelectionKind = Literal["outbound_flight", "return_flight", "hotel"]
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
@@ -44,6 +47,7 @@ class TaskStatus(StrEnum):
     completed = "completed"
     retrying = "retrying"
     failed = "failed"
+    awaiting_input = "awaiting_input"
     awaiting_approval = "awaiting_approval"
     skipped = "skipped"
 
@@ -56,6 +60,9 @@ class MessageKind(StrEnum):
     operation = "operation"
     flight_options = "flight_options"
     hotel_options = "hotel_options"
+    flight_selection = "flight_selection"
+    hotel_selection = "hotel_selection"
+    selection_confirmation = "selection_confirmation"
     budget = "budget"
     itinerary = "itinerary"
     approval = "approval"
@@ -88,6 +95,7 @@ class TravelConstraints(BaseModel):
     origin_airport: str | None = None
     destination: str | None = None
     destination_airport: str | None = None
+    visual_theme: VisualTheme | None = None
     start_date: date | None = None
     end_date: date | None = None
     duration_days: int | None = Field(default=None, ge=1, le=30)
@@ -185,6 +193,23 @@ class FlightOption(BaseModel):
     @property
     def departure_at(self) -> datetime:
         return self.outbound[0].departure_at
+
+
+class FlightLegOption(BaseModel):
+    id: str
+    provider: str
+    leg: Literal["outbound", "return"]
+    segments: list[FlightSegment]
+    total_price: int
+    currency: Literal["INR"] = "INR"
+    stops: int = 0
+    baggage: str | None = None
+    booking_url: str | None = None
+    score: float = 0
+
+    @property
+    def departure_at(self) -> datetime:
+        return self.segments[0].departure_at
 
 
 class HotelOption(BaseModel):
@@ -285,6 +310,7 @@ class Conversation(BaseModel):
     user_id: str
     title: str = "New trip"
     destination: str | None = None
+    visual_theme: VisualTheme | None = None
     last_message: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -299,6 +325,12 @@ class RunState(BaseModel):
     harness_version: int = 1
     constraints: TravelConstraints = Field(default_factory=TravelConstraints)
     graph: TaskGraph | None = None
+    outbound_flights: list[FlightLegOption] = Field(default_factory=list)
+    return_flights: list[FlightLegOption] = Field(default_factory=list)
+    selected_outbound_id: str | None = None
+    selected_return_id: str | None = None
+    selected_hotel_id: str | None = None
+    selection_stage: SelectionKind | None = None
     flights: list[FlightOption] = Field(default_factory=list)
     hotels: list[HotelOption] = Field(default_factory=list)
     places: list[PlaceOption] = Field(default_factory=list)
@@ -340,6 +372,11 @@ class SendMessageRequest(BaseModel):
     @classmethod
     def clean_text(cls, value: str) -> str:
         return value.strip()
+
+
+class TripSelectionRequest(BaseModel):
+    kind: SelectionKind
+    option_id: str = Field(min_length=1, max_length=256)
 
 
 class OperationEvent(BaseModel):

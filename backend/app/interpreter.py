@@ -11,10 +11,11 @@ from app.agent_model import (
     ModelMetrics,
     SarvamAgent,
     SarvamGateway,
+    SarvamModelError,
     TurnInterpretation,
 )
 from app.config import Settings
-from app.models import TravelConstraints
+from app.models import TravelConstraints, VisualTheme
 
 AIRPORTS: dict[str, str] = {
     "ahmedabad": "AMD",
@@ -50,6 +51,105 @@ NUMBER_WORDS = {
     "eight": 8,
     "nine": 9,
 }
+
+VISUAL_THEME_DESTINATIONS: dict[str, set[str]] = {
+    "coast": {
+        "alibaug",
+        "andaman",
+        "bali",
+        "chennai",
+        "daman",
+        "goa",
+        "gokarna",
+        "kovalam",
+        "lakshadweep",
+        "mahabalipuram",
+        "maldives",
+        "mangalore",
+        "mumbai",
+        "pondicherry",
+        "puducherry",
+        "santorini",
+        "varkala",
+        "visakhapatnam",
+    },
+    "mountains": {
+        "auli",
+        "darjeeling",
+        "dharamshala",
+        "gangtok",
+        "gulmarg",
+        "kashmir",
+        "ladakh",
+        "leh",
+        "manali",
+        "mcleodganj",
+        "mussoorie",
+        "nainital",
+        "shimla",
+        "srinagar",
+        "switzerland",
+    },
+    "heritage": {
+        "agra",
+        "ajmer",
+        "amritsar",
+        "hampi",
+        "jaipur",
+        "jaisalmer",
+        "jodhpur",
+        "khajuraho",
+        "kyoto",
+        "lucknow",
+        "mysore",
+        "udaipur",
+        "varanasi",
+    },
+    "nature": {
+        "alleppey",
+        "assam",
+        "cherrapunji",
+        "coorg",
+        "kerala",
+        "kochi",
+        "kumarakom",
+        "meghalaya",
+        "munnar",
+        "ooty",
+        "thekkady",
+        "wayanad",
+    },
+    "city": {
+        "ahmedabad",
+        "bangalore",
+        "bengaluru",
+        "delhi",
+        "dubai",
+        "hyderabad",
+        "kolkata",
+        "london",
+        "new delhi",
+        "paris",
+        "pune",
+        "singapore",
+        "tokyo",
+    },
+}
+
+
+def visual_theme_for_destination(destination: str | None) -> VisualTheme | None:
+    normalized = " ".join((destination or "").lower().split())
+    if not normalized:
+        return None
+    for theme, destinations in VISUAL_THEME_DESTINATIONS.items():
+        if any(
+            normalized == candidate
+            or candidate in normalized
+            or normalized in candidate
+            for candidate in destinations
+        ):
+            return theme
+    return "city"
 
 
 @dataclass(frozen=True)
@@ -105,13 +205,25 @@ class RequestInterpreter:
                 assumptions=assumptions,
             )
 
-        result = await self.agent.interpret(
-            today=reference_day,
-            user_message=text,
-            existing_constraints=current.model_dump(mode="json") if current else {},
-            preferences=preferences or {},
-            recent_messages=recent_messages or [],
-        )
+        try:
+            result = await self.agent.interpret(
+                today=reference_day,
+                user_message=text,
+                existing_constraints=current.model_dump(mode="json") if current else {},
+                preferences=preferences or {},
+                recent_messages=recent_messages or [],
+            )
+        except SarvamModelError as error:
+            # The deterministic pass has already extracted safe route/date
+            # facts. A malformed or temporarily unavailable model response
+            # should be observable, but must not block the traveller.
+            return InterpretationOutcome(
+                constraints=deterministic,
+                assistant_message=self._fallback_message(deterministic),
+                quick_replies=self._fallback_quick_replies(deterministic),
+                assumptions=assumptions,
+                model_metrics=error.metrics,
+            )
         merged = self._merge_model_constraints(
             text=text,
             current=current,
@@ -142,6 +254,7 @@ class RequestInterpreter:
     def _deterministic(
         self, text: str, current: TravelConstraints | None, today: date
     ) -> TravelConstraints:
+        previous_destination = current.destination if current else None
         values: dict[str, Any] = (
             current.model_dump(mode="python", exclude={"missing_fields", "inferred_fields"})
             if current
@@ -332,6 +445,14 @@ class RequestInterpreter:
             values["origin_airport"] = AIRPORTS.get(str(values["origin"]).lower())
         if values.get("destination"):
             values["destination_airport"] = AIRPORTS.get(str(values["destination"]).lower())
+            if (
+                not previous_destination
+                or str(values["destination"]).casefold()
+                != previous_destination.casefold()
+            ):
+                values["visual_theme"] = visual_theme_for_destination(
+                    str(values["destination"])
+                )
         values["inferred_fields"] = inferred
         return self._finalize(TravelConstraints.model_validate(values))
 
@@ -364,6 +485,10 @@ class RequestInterpreter:
         )
         constraints.destination_airport = AIRPORTS.get(
             (constraints.destination or "").lower()
+        )
+        constraints.visual_theme = (
+            constraints.visual_theme
+            or visual_theme_for_destination(constraints.destination)
         )
         constraints.missing_fields = constraints.required_missing()
         return constraints
@@ -411,6 +536,21 @@ class RequestInterpreter:
         values["preferences"] = list(
             dict.fromkeys([*deterministic_preferences, *model_preferences])
         )
+        destination = values.get("destination")
+        destination_changed = bool(
+            destination
+            and (
+                not current
+                or not current.destination
+                or str(destination).casefold() != current.destination.casefold()
+            )
+        )
+        if patch.get("visual_theme"):
+            # Sarvam's strict theme classification takes precedence over the
+            # conservative local fallback used when the model is unavailable.
+            values["visual_theme"] = patch["visual_theme"]
+        elif destination_changed:
+            values["visual_theme"] = visual_theme_for_destination(str(destination))
         values["inferred_fields"] = list(
             dict.fromkeys(
                 [

@@ -30,7 +30,6 @@ publishes run updates to Supabase Realtime; do not expose the secret key to Expo
 
 Create one Google Cloud project and enable:
 
-- Google Calendar API
 - Places API (New), if live attraction search is required
 
 Configure an external OAuth consent screen. For testing, add judge Google
@@ -40,7 +39,6 @@ accounts as test users. Create a **Web application** OAuth client with:
 Authorized redirect URI:
 https://uthdtiesqkjcblmyouuv.supabase.co/auth/v1/callback
 https://safar-api-ax08.onrender.com/v1/auth/google/callback
-https://safar-api-ax08.onrender.com/v1/calendar/callback
 ```
 
 Use the same Web client ID and secret in Supabase’s Google provider page.
@@ -56,12 +54,9 @@ GOOGLE_CLIENT_SECRET=...
 GOOGLE_MAPS_API_KEY=...
 ```
 
-Basic sign-in requests only `openid`, `email`, and `profile`. Calendar consent
-is requested later with:
-
-```text
-https://www.googleapis.com/auth/calendar.events.owned
-```
+Basic sign-in requests only `openid`, `email`, and `profile`. Safar creates a
+portable `.ics` file on the traveller’s device, so it does not request a Google
+Calendar scope or access a calendar account.
 
 Restrict `GOOGLE_MAPS_API_KEY` to Places API (New) and the Render service.
 The same API verifies hotel distance when “near the beach” or another location
@@ -90,8 +85,9 @@ SERPAPI_API_KEY=...
 ```
 
 Safar calls SerpApi's `google_flights` and `google_hotels` engines.
-Round-trip searches use SerpApi's documented `departure_token` follow-up so
-the return legs are provider results rather than synthesized data.
+Outbound and return options are two independent one-way flight searches. The
+traveller chooses each leg before Safar searches stays and validates the final
+combination.
 
 Fallback provider:
 

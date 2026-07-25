@@ -31,9 +31,9 @@ const benefits = [
     detail: 'Optimized for what matters to you',
   },
   {
-    icon: 'calendar-outline',
-    title: 'Saves to Google Calendar',
-    detail: 'With your approval, always',
+    icon: 'download-outline',
+    title: 'Works with any calendar',
+    detail: 'Download a portable .ics file',
   },
 ] as const;
 
@@ -107,7 +107,7 @@ export function AuthScreen() {
               ) : null}
 
               <Pressable
-                accessibilityHint="Opens Google sign-in. Calendar access is requested separately only after you approve a trip."
+                accessibilityHint="Opens Google sign-in. Safar never requests access to your calendar account."
                 accessibilityLabel="Continue with Google"
                 accessibilityRole="button"
                 accessibilityState={{ busy: signingIn, disabled: signingIn }}

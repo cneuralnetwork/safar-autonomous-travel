@@ -9,13 +9,11 @@ import {
 } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   Keyboard,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
-  Switch,
   Text,
   TextInput,
   View,
@@ -25,19 +23,20 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import * as WebBrowser from 'expo-web-browser';
 import { useAuth } from '@/auth/AuthProvider';
 import { api, ApiError } from '@/lib/api';
+import { exportItineraryCalendar } from '@/lib/calendarExport';
 import { supabase } from '@/lib/supabase';
 import {
   tripImageAssignments,
-  tripImageForKey,
+  tripImageForTrip,
 } from '@/lib/tripImages';
 import { BottomDock, type TabKey } from '@/components/BottomDock';
 import { BrandMark } from '@/components/BrandMark';
 import { Composer } from '@/components/Composer';
 import { ItineraryMap } from '@/components/ItineraryMap';
 import { MessageRenderer } from '@/components/MessageRenderer';
+import { TravelThinkingIndicator } from '@/components/TravelThinkingIndicator';
 import {
   colors,
   floatingShadow,
@@ -56,6 +55,7 @@ import type {
   ItineraryDay,
   OperationEvent,
   RunState,
+  SelectionKind,
   TravelConstraints,
 } from '@/types';
 import {
@@ -64,11 +64,6 @@ import {
   formatTime,
   relativeDate,
 } from '@/utils/format';
-
-const wait = (milliseconds: number) =>
-  new Promise<void>((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
 
 type TripSection = 'plan' | 'itinerary' | 'map' | 'details';
 
@@ -79,6 +74,18 @@ const tripSections: Array<{ key: TripSection; label: string }> = [
   { key: 'details', label: 'Details' },
 ];
 
+const thinkingRunStatuses: RunState['status'][] = [
+  'interpreting',
+  'planning',
+  'planned',
+  'running',
+  'replanning',
+];
+
+function isRunThinking(run?: RunState) {
+  return Boolean(run && thinkingRunStatuses.includes(run.status));
+}
+
 export function AppShell() {
   const { session, signOut } = useAuth();
   const insets = useSafeAreaInsets();
@@ -87,20 +94,27 @@ export function AppShell() {
   const [tripSection, setTripSection] = useState<TripSection>('plan');
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<ConversationSnapshot | null>(null);
+  const [startingPrompt, setStartingPrompt] = useState<string | null>(null);
+  const [draftChatOpen, setDraftChatOpen] = useState(false);
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [sending, setSending] = useState(false);
   const [approvalBusy, setApprovalBusy] = useState(false);
+  const [selectionBusy, setSelectionBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [composerText, setComposerText] = useState('');
   const [editingApproval, setEditingApproval] = useState(false);
-  const [resilienceDemo, setResilienceDemo] = useState(false);
   const composerRef = useRef<TextInput>(null);
   const eventCursorRef = useRef(0);
+  const startingRequestRef = useRef(0);
   const assignedTripImages = useMemo(
     () =>
       tripImageAssignments(
-        conversations.map((conversation) => conversation.id),
+        conversations.map((conversation) => ({
+          key: conversation.id,
+          destination: conversation.destination,
+          visualTheme: conversation.visual_theme,
+        })),
       ),
     [conversations],
   );
@@ -217,6 +231,14 @@ export function AppShell() {
   const sendMessage = useCallback(
     async (text: string) => {
       if (!accessToken) return;
+      const startingRequest = conversationId
+        ? null
+        : startingRequestRef.current + 1;
+      if (startingRequest) {
+        startingRequestRef.current = startingRequest;
+        setStartingPrompt(text);
+        setTripSection('plan');
+      }
       setSending(true);
       setError(null);
       try {
@@ -224,10 +246,13 @@ export function AppShell() {
           const created = await api.createConversation(
             accessToken,
             text,
-            resilienceDemo,
+            false,
           );
+          if (startingRequest !== startingRequestRef.current) return;
           setConversationId(created.conversation.id);
           setSnapshot(created);
+          setStartingPrompt(null);
+          setDraftChatOpen(false);
           setTripSection('plan');
         } else if (editingApproval && snapshot?.active_run?.approval) {
           await api.resolveApproval(
@@ -239,15 +264,27 @@ export function AppShell() {
           );
           setEditingApproval(false);
         } else {
-          await api.sendMessage(accessToken, conversationId, text, resilienceDemo);
+          await api.sendMessage(accessToken, conversationId, text, false);
           await refreshSnapshot();
         }
         await refreshConversations();
       } catch (sendError) {
+        if (
+          startingRequest !== null &&
+          startingRequest !== startingRequestRef.current
+        ) {
+          return;
+        }
         setComposerText(text);
+        setStartingPrompt(null);
         setError(messageForError(sendError));
       } finally {
-        setSending(false);
+        if (
+          startingRequest === null ||
+          startingRequest === startingRequestRef.current
+        ) {
+          setSending(false);
+        }
       }
     },
     [
@@ -256,32 +293,15 @@ export function AppShell() {
       editingApproval,
       refreshConversations,
       refreshSnapshot,
-      resilienceDemo,
       snapshot?.active_run,
     ],
   );
 
-  const connectCalendar = useCallback(async () => {
-    const connection = await api.connectCalendar(accessToken);
-    await WebBrowser.openBrowserAsync(connection.authorization_url, {
-      presentationStyle: WebBrowser.WebBrowserPresentationStyle.PAGE_SHEET,
-      controlsColor: colors.ink,
-    });
-    for (let count = 0; count < 90; count += 1) {
-      const current = await api.calendarStatus(accessToken);
-      if (current.connected) return true;
-      if (current.authorization_status === 'failed') {
-        throw new Error(current.error || 'Calendar permission was not granted.');
-      }
-      await wait(1000);
-    }
-    return false;
-  }, [accessToken]);
-
   const resolveApproval = useCallback(
     async (decision: 'approve' | 'edit' | 'cancel') => {
       const run = snapshot?.active_run;
-      if (!run?.approval) return;
+      const tripTitle = snapshot?.conversation.title;
+      if (!run?.approval || !tripTitle) return;
       if (decision === 'edit') {
         setEditingApproval(true);
         setComposerText('Change the plan: ');
@@ -294,29 +314,14 @@ export function AppShell() {
       setError(null);
       try {
         await api.resolveApproval(accessToken, run.id, run.approval, decision);
-      } catch (approvalError) {
-        if (
-          decision === 'approve' &&
-          approvalError instanceof ApiError &&
-          approvalError.status === 409
-        ) {
-          try {
-            const connected = await connectCalendar();
-            if (!connected) {
-              throw new Error('Calendar connection was not completed.');
-            }
-            await api.resolveApproval(
-              accessToken,
-              run.id,
-              run.approval,
-              'approve',
-            );
-          } catch (calendarError) {
-            setError(messageForError(calendarError));
-          }
-        } else {
-          setError(messageForError(approvalError));
+        if (decision === 'approve' && run.itinerary) {
+          await exportItineraryCalendar(
+            run.itinerary,
+            tripTitle,
+          );
         }
+      } catch (approvalError) {
+        setError(messageForError(approvalError));
       } finally {
         setApprovalBusy(false);
         await refreshSnapshot();
@@ -325,31 +330,112 @@ export function AppShell() {
     },
     [
       accessToken,
-      connectCalendar,
       refreshConversations,
       refreshSnapshot,
+      snapshot,
+    ],
+  );
+
+  const selectTripOption = useCallback(
+    async (kind: SelectionKind, optionId: string) => {
+      const run = snapshot?.active_run;
+      if (!run || selectionBusy) return;
+      setSelectionBusy(true);
+      setError(null);
+      try {
+        const updated = await api.selectOption(
+          accessToken,
+          run.id,
+          kind,
+          optionId,
+        );
+        setSnapshot((current) =>
+          current
+            ? {
+                ...current,
+                active_run: updated,
+              }
+            : current,
+        );
+      } catch (selectionError) {
+        setError(messageForError(selectionError));
+      } finally {
+        setSelectionBusy(false);
+        await refreshSnapshot();
+      }
+    },
+    [
+      accessToken,
+      refreshSnapshot,
+      selectionBusy,
       snapshot?.active_run,
     ],
   );
 
+  const exportCalendar = useCallback(async () => {
+    const run = snapshot?.active_run;
+    const tripTitle = snapshot?.conversation.title;
+    if (!run?.itinerary || !tripTitle) {
+      setError('Your itinerary is not ready to export yet.');
+      return;
+    }
+    setApprovalBusy(true);
+    setError(null);
+    try {
+      await exportItineraryCalendar(
+        run.itinerary,
+        tripTitle,
+      );
+    } catch (calendarError) {
+      setError(messageForError(calendarError));
+    } finally {
+      setApprovalBusy(false);
+    }
+  }, [snapshot]);
+
   const openConversation = useCallback((id: string) => {
+    startingRequestRef.current += 1;
+    setStartingPrompt(null);
+    setDraftChatOpen(false);
+    setSending(false);
     setConversationId(id);
     setTripSection('plan');
     setTab('plan');
   }, []);
 
-  const newTrip = useCallback(() => {
+  const returnHome = useCallback(() => {
     Keyboard.dismiss();
+    startingRequestRef.current += 1;
     setConversationId(null);
     setSnapshot(null);
+    setStartingPrompt(null);
+    setDraftChatOpen(false);
+    setSending(false);
     setComposerText('');
     setEditingApproval(false);
     setTripSection('plan');
     setTab('plan');
   }, []);
 
-  const darkStatusBar = tab === 'plan' && !snapshot;
+  const openNewChat = useCallback(() => {
+    startingRequestRef.current += 1;
+    setConversationId(null);
+    setSnapshot(null);
+    setStartingPrompt(null);
+    setDraftChatOpen(true);
+    setSending(false);
+    setComposerText('');
+    setEditingApproval(false);
+    setError(null);
+    setTripSection('plan');
+    setTab('plan');
+    requestAnimationFrame(() => composerRef.current?.focus());
+  }, []);
+
+  const darkStatusBar =
+    tab === 'plan' && !snapshot && !startingPrompt && !draftChatOpen;
   const dockBottom = Math.max(10, insets.bottom + 2);
+  const chatComposerBottom = dockBottom + 88;
   const displayName =
     session?.user.user_metadata.full_name ||
     session?.user.user_metadata.name ||
@@ -363,7 +449,10 @@ export function AppShell() {
       >
         <StatusBar style={darkStatusBar ? 'light' : 'dark'} />
         <View style={styles.content}>
-          {tab === 'plan' && !snapshot ? (
+          {tab === 'plan' &&
+          !snapshot &&
+          !startingPrompt &&
+          !draftChatOpen ? (
             <HomeScreen
               name={displayName}
               conversations={conversations}
@@ -376,8 +465,32 @@ export function AppShell() {
               composerText={composerText}
               setComposerText={setComposerText}
               composerRef={composerRef}
-              resilienceDemo={resilienceDemo}
-              setResilienceDemo={setResilienceDemo}
+            />
+          ) : null}
+          {tab === 'plan' &&
+          !snapshot &&
+          !startingPrompt &&
+          draftChatOpen ? (
+            <NewTripChatWorkspace
+              onBack={returnHome}
+              onSend={sendMessage}
+              sending={sending}
+              error={error}
+              composerText={composerText}
+              setComposerText={setComposerText}
+              composerRef={composerRef}
+              composerBottom={chatComposerBottom}
+            />
+          ) : null}
+          {tab === 'plan' && !snapshot && startingPrompt ? (
+            <StartingTripWorkspace
+              prompt={startingPrompt}
+              onBack={returnHome}
+              onSend={sendMessage}
+              composerText={composerText}
+              setComposerText={setComposerText}
+              composerRef={composerRef}
+              composerBottom={chatComposerBottom}
             />
           ) : null}
           {tab === 'plan' && snapshot ? (
@@ -385,20 +498,33 @@ export function AppShell() {
               snapshot={snapshot}
               image={
                 assignedTripImages.get(snapshot.conversation.id) ??
-                tripImageForKey(snapshot.conversation.id)
+                tripImageForTrip({
+                  key: snapshot.conversation.id,
+                  destination:
+                    snapshot.active_run?.constraints.destination ??
+                    snapshot.conversation.destination,
+                  visualTheme:
+                    snapshot.active_run?.constraints.visual_theme ??
+                    snapshot.conversation.visual_theme,
+                })
               }
               section={tripSection}
               setSection={setTripSection}
-              onBack={newTrip}
+              onBack={returnHome}
               onSend={sendMessage}
               sending={sending}
+              thinking={sending || isRunThinking(snapshot.active_run)}
               error={error}
               composerText={composerText}
               setComposerText={setComposerText}
               composerRef={composerRef}
               onApproval={resolveApproval}
+              onCalendarExport={exportCalendar}
               approvalBusy={approvalBusy}
+              onSelectOption={selectTripOption}
+              selectionBusy={selectionBusy}
               editingApproval={editingApproval}
+              composerBottom={chatComposerBottom}
             />
           ) : null}
           {tab === 'trips' ? (
@@ -406,7 +532,7 @@ export function AppShell() {
               conversations={conversations}
               activeId={conversationId}
               onOpen={openConversation}
-              onNewTrip={newTrip}
+              onNewTrip={openNewChat}
             />
           ) : null}
           {tab === 'activity' ? (
@@ -418,21 +544,154 @@ export function AppShell() {
           ) : null}
           {tab === 'profile' ? (
             <ProfileScreen
-              accessToken={accessToken}
               name={displayName}
               email={session?.user.email || ''}
-              avatar={session?.user.user_metadata.avatar_url}
-              resilienceDemo={resilienceDemo}
-              setResilienceDemo={setResilienceDemo}
-              connectCalendar={connectCalendar}
+              avatar={
+                session?.user.user_metadata.avatar_url ||
+                session?.user.user_metadata.picture ||
+                session?.user.user_metadata.avatar
+              }
               signOut={signOut}
             />
           ) : null}
         </View>
         <View style={[styles.dockWrap, { bottom: dockBottom }]}>
-          <BottomDock active={tab} onChange={setTab} onCreate={newTrip} />
+          <BottomDock active={tab} onChange={setTab} onCreate={openNewChat} />
         </View>
       </SafeAreaView>
+    </View>
+  );
+}
+
+function NewTripChatWorkspace({
+  onBack,
+  onSend,
+  sending,
+  error,
+  composerText,
+  setComposerText,
+  composerRef,
+  composerBottom,
+}: {
+  onBack: () => void;
+  onSend: (text: string) => Promise<void>;
+  sending: boolean;
+  error: string | null;
+  composerText: string;
+  setComposerText: (text: string) => void;
+  composerRef: RefObject<TextInput | null>;
+  composerBottom: number;
+}) {
+  return (
+    <View style={styles.workspace}>
+      <View style={styles.tripHeader}>
+        <Pressable
+          onPress={onBack}
+          accessibilityRole="button"
+          accessibilityLabel="Back to home"
+          style={({ pressed }) => [styles.headerCircle, pressed && styles.pressed]}
+        >
+          <Ionicons name="arrow-back" size={21} color={colors.ink} />
+        </Pressable>
+        <View style={styles.tripHeaderCopy}>
+          <Text style={styles.tripHeaderTitle}>New trip</Text>
+          <Text style={styles.tripHeaderMeta}>Start a fresh conversation</Text>
+        </View>
+        <View style={styles.pendingHeaderSpacer} />
+      </View>
+      <View style={styles.newChatBody}>
+        <View style={styles.newChatWelcome}>
+          <View style={styles.newChatMark}>
+            <Ionicons name="sparkles" size={25} color={colors.primary} />
+          </View>
+          <Text style={styles.newChatTitle}>Where should we go next?</Text>
+          <Text style={styles.newChatText}>
+            Tell Safar the place, budget, dates, or even just the kind of trip
+            you feel like taking.
+          </Text>
+        </View>
+      </View>
+      <View style={[styles.pinnedComposer, { bottom: composerBottom }]}>
+        {error ? <InlineError text={error} /> : null}
+        <Composer
+          ref={composerRef}
+          value={composerText}
+          onChangeText={setComposerText}
+          onSend={onSend}
+          busy={sending}
+          variant="compact"
+          placeholder="Message Safar…"
+        />
+      </View>
+    </View>
+  );
+}
+
+function StartingTripWorkspace({
+  prompt,
+  onBack,
+  onSend,
+  composerText,
+  setComposerText,
+  composerRef,
+  composerBottom,
+}: {
+  prompt: string;
+  onBack: () => void;
+  onSend: (text: string) => Promise<void>;
+  composerText: string;
+  setComposerText: (text: string) => void;
+  composerRef: RefObject<TextInput | null>;
+  composerBottom: number;
+}) {
+  return (
+    <View style={styles.workspace}>
+      <View style={styles.tripHeader}>
+        <Pressable
+          onPress={onBack}
+          accessibilityRole="button"
+          accessibilityLabel="Back to home"
+          style={({ pressed }) => [styles.headerCircle, pressed && styles.pressed]}
+        >
+          <Ionicons name="arrow-back" size={21} color={colors.ink} />
+        </Pressable>
+        <View style={styles.tripHeaderCopy}>
+          <Text style={styles.tripHeaderTitle}>Planning your trip</Text>
+          <Text style={styles.tripHeaderMeta}>Safar is preparing your workspace</Text>
+        </View>
+        <View style={styles.pendingHeaderSpacer} />
+      </View>
+      <ScrollView
+        style={styles.workspaceScroll}
+        contentContainerStyle={styles.pendingWorkspaceContent}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.pendingUserRow}>
+          <View style={styles.pendingUserBubble}>
+            <Text style={styles.pendingUserText}>{prompt}</Text>
+          </View>
+        </View>
+        <TravelThinkingIndicator phase="interpreting" />
+        <View style={styles.pendingHint}>
+          <Ionicons name="flash-outline" size={15} color={colors.primary} />
+          <Text style={styles.pendingHintText}>
+            Your request is already with the agent. The route will appear here
+            as it is built.
+          </Text>
+        </View>
+      </ScrollView>
+      <View style={[styles.pinnedComposer, { bottom: composerBottom }]}>
+        <Composer
+          ref={composerRef}
+          value={composerText}
+          onChangeText={setComposerText}
+          onSend={onSend}
+          busy
+          variant="compact"
+          placeholder="You can type the next detail while Safar thinks…"
+        />
+      </View>
     </View>
   );
 }
@@ -449,8 +708,6 @@ function HomeScreen({
   composerText,
   setComposerText,
   composerRef,
-  resilienceDemo,
-  setResilienceDemo,
 }: {
   name: string;
   conversations: Conversation[];
@@ -463,27 +720,15 @@ function HomeScreen({
   composerText: string;
   setComposerText: (text: string) => void;
   composerRef: RefObject<TextInput | null>;
-  resilienceDemo: boolean;
-  setResilienceDemo: (value: boolean) => void;
 }) {
   const firstName = name.trim().split(/\s+/)[0] || 'Traveller';
   const images = tripImageAssignments(
-    conversations.map((conversation) => conversation.id),
+    conversations.map((conversation) => ({
+      key: conversation.id,
+      destination: conversation.destination,
+      visualTheme: conversation.visual_theme,
+    })),
   );
-  const quickActions: Array<{
-    label: string;
-    icon: keyof typeof Ionicons.glyphMap;
-    action: () => void;
-  }> = [
-    { label: 'Trips', icon: 'briefcase-outline', action: () => onTab('trips') },
-    { label: 'Calendar', icon: 'calendar-outline', action: () => onTab('profile') },
-    { label: 'Preferences', icon: 'heart-outline', action: () => onTab('profile') },
-    {
-      label: 'Explore',
-      icon: 'compass-outline',
-      action: () => composerRef.current?.focus(),
-    },
-  ];
   return (
     <View style={styles.homeScreen}>
       <LinearGradient colors={gradients.navy} style={styles.homeHeader}>
@@ -503,18 +748,6 @@ function HomeScreen({
             <Text style={styles.greetingTitle}>Good morning, {firstName} 👋</Text>
             <Text style={styles.greetingBody}>Where do you want to go next?</Text>
           </View>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="View activity"
-            onPress={() => onTab('activity')}
-            style={({ pressed }) => [
-              styles.headerCircleDark,
-              pressed && styles.pressed,
-            ]}
-          >
-            <Ionicons name="notifications-outline" size={21} color={colors.surface} />
-            <View style={styles.notificationDot} />
-          </Pressable>
         </View>
       </LinearGradient>
       <ScrollView
@@ -534,23 +767,6 @@ function HomeScreen({
             variant="prompt"
             placeholder="Describe your dream trip, budget and dates…"
           />
-        </View>
-        <View style={styles.quickGrid}>
-          {quickActions.map((item) => (
-            <Pressable
-              key={item.label}
-              onPress={item.action}
-              style={({ pressed }) => [
-                styles.quickAction,
-                pressed && styles.pressed,
-              ]}
-            >
-              <View style={styles.quickIcon}>
-                <Ionicons name={item.icon} size={22} color={colors.primary} />
-              </View>
-              <Text style={styles.quickLabel}>{item.label}</Text>
-            </Pressable>
-          ))}
         </View>
 
         <SectionHeader
@@ -573,7 +789,11 @@ function HomeScreen({
                 <Image
                   source={
                     images.get(conversation.id) ??
-                    tripImageForKey(conversation.id)
+                    tripImageForTrip({
+                      key: conversation.id,
+                      destination: conversation.destination,
+                      visualTheme: conversation.visual_theme,
+                    })
                   }
                   style={styles.homeTripImage}
                   contentFit="cover"
@@ -670,21 +890,6 @@ function HomeScreen({
           </>
         ) : null}
 
-        <View style={styles.labRow}>
-          <View style={styles.labIcon}>
-            <Ionicons name="shield-checkmark-outline" size={19} color={colors.primary} />
-          </View>
-          <View style={styles.labCopy}>
-            <Text style={styles.labTitle}>Resilience demo</Text>
-            <Text style={styles.labBody}>Show how Safar recovers from one provider timeout.</Text>
-          </View>
-          <Switch
-            value={resilienceDemo}
-            onValueChange={setResilienceDemo}
-            trackColor={{ false: colors.lineStrong, true: '#B9B1F2' }}
-            thumbColor={resilienceDemo ? colors.primary : colors.surface}
-          />
-        </View>
       </ScrollView>
     </View>
   );
@@ -698,13 +903,18 @@ function TripWorkspace({
   onBack,
   onSend,
   sending,
+  thinking,
   error,
   composerText,
   setComposerText,
   composerRef,
   onApproval,
+  onCalendarExport,
   approvalBusy,
+  onSelectOption,
+  selectionBusy,
   editingApproval,
+  composerBottom,
 }: {
   snapshot: ConversationSnapshot;
   image: ImageSource;
@@ -713,13 +923,18 @@ function TripWorkspace({
   onBack: () => void;
   onSend: (text: string) => Promise<void>;
   sending: boolean;
+  thinking: boolean;
   error: string | null;
   composerText: string;
   setComposerText: (text: string) => void;
   composerRef: RefObject<TextInput | null>;
   onApproval: (decision: 'approve' | 'edit' | 'cancel') => void;
+  onCalendarExport: () => void;
   approvalBusy: boolean;
+  onSelectOption: (kind: SelectionKind, optionId: string) => void;
+  selectionBusy: boolean;
   editingApproval: boolean;
+  composerBottom: number;
 }) {
   const run = snapshot.active_run;
   const dates = dateRange(run?.constraints);
@@ -775,55 +990,67 @@ function TripWorkspace({
       </View>
 
       {section === 'plan' ? (
-        <ScrollView
-          style={styles.workspaceScroll}
-          contentContainerStyle={styles.workspaceContent}
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
-        >
-          {run?.selected_package ? (
-            <PlanOverview
-              run={run}
-              onApproval={onApproval}
-              approvalBusy={approvalBusy}
-            />
-          ) : null}
-          <Text style={styles.workspaceSectionTitle}>
-            {run?.selected_package ? 'Planning trail' : 'Building your best route'}
-          </Text>
-          <View style={styles.messageStack}>
-            {snapshot.messages.map((message) => (
-              <MessageRenderer
-                key={message.id}
-                message={message}
-                activeGraph={
-                  message.run_id === run?.id ? run?.graph : undefined
-                }
-                onQuickReply={(reply) => void onSend(reply)}
+        <>
+          <ScrollView
+            style={styles.workspaceScroll}
+            contentContainerStyle={styles.workspaceContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            {run?.selected_package ? (
+              <PlanOverview
+                run={run}
                 onApproval={onApproval}
                 approvalBusy={approvalBusy}
               />
-            ))}
-          </View>
-          <View style={styles.workspaceComposer}>
-            {error ? <InlineError text={error} /> : null}
-            <Composer
-              ref={composerRef}
-              value={composerText}
-              onChangeText={setComposerText}
-              onSend={onSend}
-              busy={sending}
-              variant="compact"
-              placeholder={
-                editingApproval
-                  ? 'Describe the change…'
-                  : run?.status === 'awaiting_input'
-                    ? 'Answer Safar…'
-                    : 'Ask Safar to change anything…'
-              }
-            />
-          </View>
-        </ScrollView>
+            ) : null}
+            <Text style={styles.workspaceSectionTitle}>
+              {run?.selected_package ? 'Planning trail' : 'Building your best route'}
+            </Text>
+            <View style={styles.messageStack}>
+              {snapshot.messages.map((message) => (
+                <MessageRenderer
+                  key={message.id}
+                  message={message}
+                  activeGraph={
+                    message.run_id === run?.id ? run?.graph : undefined
+                  }
+                  onApproval={onApproval}
+                  onCalendarExport={onCalendarExport}
+                  onSelectOption={onSelectOption}
+                  approvalBusy={approvalBusy}
+                  selectionBusy={
+                    selectionBusy || message.run_id !== run?.id
+                  }
+                  selectedOutboundId={
+                    message.run_id === run?.id
+                      ? run?.selected_outbound_id
+                      : undefined
+                  }
+                  selectedReturnId={
+                    message.run_id === run?.id
+                      ? run?.selected_return_id
+                      : undefined
+                  }
+                  selectedHotelId={
+                    message.run_id === run?.id
+                      ? run?.selected_hotel_id
+                      : undefined
+                  }
+                  destination={
+                    run?.constraints.destination ?? snapshot.conversation.destination
+                  }
+                  visualTheme={
+                    run?.constraints.visual_theme ?? snapshot.conversation.visual_theme
+                  }
+                />
+              ))}
+              {thinking ? (
+                <TravelThinkingIndicator phase={run?.phase ?? 'interpreting'} />
+              ) : null}
+            </View>
+          </ScrollView>
+        </>
       ) : null}
       {section === 'itinerary' ? (
         <ItineraryOverview
@@ -836,6 +1063,24 @@ function TripWorkspace({
       {section === 'details' ? (
         <DetailsOverview run={run} conversation={snapshot.conversation} />
       ) : null}
+      <View style={[styles.pinnedComposer, { bottom: composerBottom }]}>
+        {error ? <InlineError text={error} /> : null}
+        <Composer
+          ref={composerRef}
+          value={composerText}
+          onChangeText={setComposerText}
+          onSend={onSend}
+          busy={sending}
+          variant="compact"
+          placeholder={
+            editingApproval
+              ? 'Describe the change…'
+              : run?.status === 'awaiting_input'
+                ? 'Answer Safar…'
+                : 'Ask Safar to change anything…'
+          }
+        />
+      </View>
     </View>
   );
 }
@@ -974,10 +1219,10 @@ function PlanOverview({
             {approvalBusy ? (
               <ActivityIndicator size="small" color={colors.surface} />
             ) : (
-              <Ionicons name="calendar-outline" size={18} color={colors.surface} />
+              <Ionicons name="download-outline" size={18} color={colors.surface} />
             )}
             <Text style={styles.primaryActionText}>
-              {approvalBusy ? 'Saving…' : 'Approve & save'}
+              {approvalBusy ? 'Preparing…' : 'Download .ics'}
             </Text>
           </Pressable>
         </View>
@@ -1253,29 +1498,35 @@ function DetailsOverview({
           </Text>
         )}
       </View>
-      {run?.graph ? (
-        <View style={styles.detailsCard}>
-          <Text style={styles.planCardTitle}>Planning progress</Text>
-          {run.graph.tasks.map((task) => (
-            <View key={task.id} style={styles.taskDetail}>
-              <View
-                style={[
-                  styles.taskDot,
-                  task.status === 'completed' && styles.taskDotComplete,
-                  task.status === 'failed' && styles.taskDotFailed,
-                ]}
-              />
-              <View style={styles.taskDetailCopy}>
-                <Text style={styles.taskDetailTitle}>{task.title}</Text>
-                <Text style={styles.taskDetailStatus}>
-                  {task.status.replace('_', ' ')}
-                  {task.provider ? ` · ${task.provider}` : ''}
-                </Text>
-              </View>
-            </View>
-          ))}
+      <View style={styles.detailsCard}>
+        <Text style={styles.planCardTitle}>You’re always in control</Text>
+        <View style={styles.controlRow}>
+          <View style={styles.detailIcon}>
+            <Ionicons
+              name="shield-checkmark-outline"
+              size={18}
+              color={colors.primary}
+            />
+          </View>
+          <View style={styles.detailCopy}>
+            <Text style={styles.detailValue}>No automatic purchases</Text>
+            <Text style={styles.detailLabel}>
+              Safar compares and recommends, but never books or spends.
+            </Text>
+          </View>
         </View>
-      ) : null}
+        <View style={[styles.controlRow, styles.detailRowBorder]}>
+          <View style={styles.detailIcon}>
+            <Ionicons name="calendar-outline" size={18} color={colors.primary} />
+          </View>
+          <View style={styles.detailCopy}>
+            <Text style={styles.detailValue}>Works with any calendar app</Text>
+            <Text style={styles.detailLabel}>
+              Download a portable .ics file and open it wherever you prefer.
+            </Text>
+          </View>
+        </View>
+      </View>
     </ScrollView>
   );
 }
@@ -1292,7 +1543,11 @@ function TripsScreen({
   onNewTrip: () => void;
 }) {
   const images = tripImageAssignments(
-    conversations.map((conversation) => conversation.id),
+    conversations.map((conversation) => ({
+      key: conversation.id,
+      destination: conversation.destination,
+      visualTheme: conversation.visual_theme,
+    })),
   );
   return (
     <View style={styles.standardScreen}>
@@ -1345,7 +1600,11 @@ function TripsScreen({
               <Image
                 source={
                   images.get(conversation.id) ??
-                  tripImageForKey(conversation.id)
+                  tripImageForTrip({
+                    key: conversation.id,
+                    destination: conversation.destination,
+                    visualTheme: conversation.visual_theme,
+                  })
                 }
                 style={styles.tripCardImage}
                 contentFit="cover"
@@ -1368,7 +1627,7 @@ function TripsScreen({
             <EmptyState
               icon="briefcase-outline"
               title="No saved trips yet"
-              body="Your first plan will appear here with its full decision trail."
+              body="Your first plan will appear here when you start a new journey."
               compact
             />
           ) : null}
@@ -1376,6 +1635,39 @@ function TripsScreen({
       </ScrollView>
     </View>
   );
+}
+
+const activityTitles: Record<string, string> = {
+  understand_request: 'Understanding your trip',
+  resolve_constraints: 'Confirming your travel details',
+  resolve_locations: 'Finding the right airports',
+  flight_search: 'Checking available flights',
+  hotel_search: 'Finding stays that fit',
+  place_search: 'Exploring things to do',
+  compare_packages: 'Comparing the best combinations',
+  create_itinerary: 'Arranging your day-by-day plan',
+  request_approval: 'Preparing the trip for your review',
+  add_calendar: 'Preparing your portable calendar file',
+  create_report: 'Finishing your trip summary',
+};
+
+function friendlyActivity(
+  taskId: string | undefined,
+  status: string,
+  fallback: string,
+) {
+  const title = (taskId && activityTitles[taskId]) || fallback;
+  const detail =
+    status === 'completed'
+      ? 'Ready'
+      : status === 'retrying'
+        ? 'Checking another option'
+        : status === 'failed'
+          ? 'This update needs attention'
+          : status === 'awaiting_approval'
+            ? 'Waiting for your review'
+            : 'In progress';
+  return { title, detail };
 }
 
 function ActivityScreen({
@@ -1392,13 +1684,20 @@ function ActivityScreen({
       return events
         .slice()
         .reverse()
-        .map((event) => ({
-          id: String(event.id),
-          createdAt: event.created_at,
-          status: event.status,
-          summary: event.summary,
-          reason: event.reason || event.type.replaceAll('_', ' '),
-        }));
+        .map((event) => {
+          const copy = friendlyActivity(
+            event.task_id,
+            event.status,
+            event.summary,
+          );
+          return {
+            id: String(event.id),
+            createdAt: event.created_at,
+            status: event.status,
+            summary: copy.title,
+            reason: copy.detail,
+          };
+        });
     }
     return messages
       .filter((message) => ['operation', 'error', 'calendar'].includes(message.kind))
@@ -1406,13 +1705,19 @@ function ActivityScreen({
       .reverse()
       .map((message) => {
         const event = message.payload.event as OperationEvent | undefined;
+        const status =
+          event?.status || (message.kind === 'error' ? 'failed' : 'completed');
+        const copy = friendlyActivity(
+          event?.task_id,
+          status,
+          event?.summary || message.text,
+        );
         return {
           id: message.id,
           createdAt: message.created_at,
-          status:
-            event?.status || (message.kind === 'error' ? 'failed' : 'completed'),
-          summary: event?.summary || message.text,
-          reason: event?.reason || message.kind.replaceAll('_', ' '),
+          status,
+          summary: copy.title,
+          reason: copy.detail,
         };
       });
   }, [events, messages]);
@@ -1427,12 +1732,12 @@ function ActivityScreen({
           <View style={styles.activityHeroMark}>
             <Ionicons name="pulse" size={22} color={colors.primary} />
           </View>
-          <Text style={styles.activityHeroEyebrow}>Transparent by default</Text>
-          <Text style={styles.activityHeroTitle}>What Safar did</Text>
+          <Text style={styles.activityHeroEyebrow}>Trip updates</Text>
+          <Text style={styles.activityHeroTitle}>How your plan came together</Text>
           <Text style={styles.activityHeroBody}>
             {tripTitle
-              ? `The live action log for ${tripTitle}.`
-              : 'Open a trip to see each provider call, recovery and calendar action.'}
+              ? `The latest planning updates for ${tripTitle}.`
+              : 'Open a trip to see searches, comparisons and itinerary updates.'}
           </Text>
         </View>
         {operations.length ? (
@@ -1473,8 +1778,8 @@ function ActivityScreen({
         ) : (
           <EmptyState
             icon="pulse-outline"
-            title="No execution yet"
-            body="Start or open a trip and its live action log will appear here."
+            title="No trip updates yet"
+            body="Start or open a trip and its planning updates will appear here."
             compact
           />
         )}
@@ -1483,50 +1788,44 @@ function ActivityScreen({
   );
 }
 
+function GoogleProfileImage({ uri, name }: { uri: string; name: string }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [uri]);
+
+  if (failed) {
+    return (
+      <View style={styles.profileInitials}>
+        <Text style={styles.profileInitialsText}>
+          {name.trim().slice(0, 1).toUpperCase() || 'T'}
+        </Text>
+      </View>
+    );
+  }
+
+  return (
+    <Image
+      source={{ uri }}
+      style={styles.profileAvatar}
+      contentFit="cover"
+      cachePolicy="memory-disk"
+      transition={180}
+      onError={() => setFailed(true)}
+      accessibilityLabel={`${name}'s Google profile photo`}
+    />
+  );
+}
+
 function ProfileScreen({
-  accessToken,
   name,
   email,
   avatar,
-  resilienceDemo,
-  setResilienceDemo,
-  connectCalendar,
   signOut,
 }: {
-  accessToken: string;
   name: string;
   email: string;
   avatar?: string;
-  resilienceDemo: boolean;
-  setResilienceDemo: (value: boolean) => void;
-  connectCalendar: () => Promise<boolean>;
   signOut: () => Promise<void>;
 }) {
-  const [calendarConnected, setCalendarConnected] = useState(false);
-  const [calendarBusy, setCalendarBusy] = useState(false);
-  useEffect(() => {
-    void api
-      .calendarStatus(accessToken)
-      .then((status) => setCalendarConnected(status.connected))
-      .catch(() => setCalendarConnected(false));
-  }, [accessToken]);
-
-  const toggleCalendar = async () => {
-    setCalendarBusy(true);
-    try {
-      if (calendarConnected) {
-        await api.disconnectCalendar(accessToken);
-        setCalendarConnected(false);
-      } else {
-        setCalendarConnected(await connectCalendar());
-      }
-    } catch (calendarError) {
-      Alert.alert('Calendar', messageForError(calendarError));
-    } finally {
-      setCalendarBusy(false);
-    }
-  };
-
   return (
     <View style={styles.standardScreen}>
       <ScreenHeader eyebrow="Safar account" title="Your account" />
@@ -1536,7 +1835,7 @@ function ProfileScreen({
       >
         <LinearGradient colors={gradients.navy} style={styles.profileCard}>
           {avatar ? (
-            <Image source={{ uri: avatar }} style={styles.profileAvatar} />
+            <GoogleProfileImage uri={avatar} name={name} />
           ) : (
             <View style={styles.profileBrand}>
               <BrandMark size={62} />
@@ -1549,43 +1848,14 @@ function ProfileScreen({
             <Text style={styles.googleOnlyText}>Signed in with Google</Text>
           </View>
         </LinearGradient>
-        <Text style={styles.settingsLabel}>Connections</Text>
+        <Text style={styles.settingsLabel}>Trip files</Text>
         <View style={styles.settingsGroup}>
           <SettingRow
-            icon="calendar-outline"
-            title="Google Calendar"
-            subtitle={
-              calendarConnected
-                ? 'Connected · every write still needs your approval'
-                : 'Connect when you are ready to save an itinerary'
-            }
+            icon="document-attach-outline"
+            title="Portable calendar exports"
+            subtitle="Download .ics files that open in any calendar app"
             action={
-              calendarBusy ? (
-                <ActivityIndicator size="small" color={colors.primary} />
-              ) : (
-                <Switch
-                  value={calendarConnected}
-                  onValueChange={() => void toggleCalendar()}
-                  trackColor={{ false: colors.lineStrong, true: '#B9B1F2' }}
-                  thumbColor={calendarConnected ? colors.primary : colors.surface}
-                />
-              )
-            }
-          />
-        </View>
-        <Text style={styles.settingsLabel}>Planning lab</Text>
-        <View style={styles.settingsGroup}>
-          <SettingRow
-            icon="shield-checkmark-outline"
-            title="Resilience demo"
-            subtitle="Labels and recovers from one injected provider timeout"
-            action={
-              <Switch
-                value={resilienceDemo}
-                onValueChange={setResilienceDemo}
-                trackColor={{ false: colors.lineStrong, true: '#B9B1F2' }}
-                thumbColor={resilienceDemo ? colors.primary : colors.surface}
-              />
+              <Ionicons name="download-outline" size={20} color={colors.primary} />
             }
           />
         </View>
@@ -1597,8 +1867,8 @@ function ProfileScreen({
           <Text style={styles.signOutText}>Sign out</Text>
         </Pressable>
         <Text style={styles.authNote}>
-          Safar uses Google sign-in only. Calendar access remains separate and is
-          requested only when you choose to connect it.
+          Safar uses Google sign-in only. It never asks for access to your
+          calendar account.
         </Text>
       </ScrollView>
     </View>
@@ -1833,7 +2103,7 @@ const styles = StyleSheet.create({
   homeTopRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    gap: 14,
   },
   headerCircleDark: {
     width: 42,
@@ -1845,45 +2115,42 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.09)',
   },
-  notificationDot: {
-    position: 'absolute',
-    right: 4,
-    top: 2,
-    width: 9,
-    height: 9,
-    borderRadius: 5,
-    backgroundColor: colors.coral,
-    borderWidth: 2,
-    borderColor: colors.navy,
+  greeting: {
+    alignItems: 'flex-start',
+    flex: 1,
   },
-  greeting: { alignItems: 'center', flex: 1, paddingHorizontal: 10 },
-  greetingTitle: { ...type.label, color: colors.surface },
-  greetingBody: { ...type.body, color: colors.whiteMuted, marginTop: 2 },
-  homeScroll: { flex: 1, marginTop: -80 },
+  greetingTitle: {
+    fontFamily: fonts.bold,
+    fontSize: 18,
+    lineHeight: 24,
+    color: colors.surface,
+  },
+  greetingBody: {
+    fontFamily: fonts.regular,
+    fontSize: 16,
+    lineHeight: 23,
+    color: colors.whiteMuted,
+    marginTop: 2,
+  },
+  homeScroll: {
+    flex: 1,
+    marginTop: -92,
+    overflow: 'visible',
+  },
   homeScrollContent: {
     paddingHorizontal: layout.gutter,
+    paddingTop: 16,
     paddingBottom: 116,
     gap: 14,
   },
-  homePrompt: { gap: 7, ...floatingShadow },
-  quickGrid: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingTop: 3,
+  homePrompt: {
+    gap: 7,
+    marginBottom: 12,
+    borderRadius: 20,
+    borderCurve: 'continuous',
+    overflow: 'visible',
+    zIndex: 2,
   },
-  quickAction: { width: '23%', alignItems: 'center', gap: 7 },
-  quickIcon: {
-    width: '100%',
-    height: 54,
-    borderRadius: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.line,
-    ...shadow,
-  },
-  quickLabel: { ...type.caption, color: colors.ink, textAlign: 'center' },
   sectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1974,26 +2241,6 @@ const styles = StyleSheet.create({
   recentTitle: { ...type.caption, color: colors.ink },
   recentMeta: { fontFamily: fonts.regular, fontSize: 10, color: colors.muted },
   recentDate: { fontFamily: fonts.regular, fontSize: 9, color: colors.muted },
-  labRow: {
-    minHeight: 68,
-    paddingHorizontal: 12,
-    borderRadius: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    backgroundColor: colors.surfaceTint,
-  },
-  labIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 13,
-    backgroundColor: colors.primarySoft,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  labCopy: { flex: 1 },
-  labTitle: { ...type.label, color: colors.ink },
-  labBody: { ...type.caption, color: colors.muted, marginTop: 2 },
   workspace: { flex: 1, backgroundColor: colors.canvas },
   tripHeader: {
     minHeight: 62,
@@ -2046,7 +2293,7 @@ const styles = StyleSheet.create({
   workspaceContent: {
     paddingHorizontal: 14,
     paddingTop: 2,
-    paddingBottom: 118,
+    paddingBottom: 196,
   },
   workspaceSectionTitle: {
     ...type.section,
@@ -2055,7 +2302,83 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   messageStack: { gap: 2 },
-  workspaceComposer: { marginTop: 16, gap: 7 },
+  pinnedComposer: {
+    position: 'absolute',
+    left: 14,
+    right: 14,
+    zIndex: 35,
+    gap: 7,
+  },
+  pendingHeaderSpacer: { width: 40, height: 40 },
+  newChatBody: {
+    flex: 1,
+    paddingHorizontal: 14,
+    paddingTop: 18,
+    paddingBottom: 196,
+    gap: 18,
+  },
+  newChatWelcome: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 28,
+  },
+  newChatMark: {
+    width: 54,
+    height: 54,
+    borderRadius: 18,
+    borderCurve: 'continuous',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.primarySoft,
+  },
+  newChatTitle: {
+    ...type.section,
+    color: colors.ink,
+    marginTop: 14,
+    textAlign: 'center',
+  },
+  newChatText: {
+    ...type.body,
+    maxWidth: 310,
+    color: colors.muted,
+    marginTop: 5,
+    textAlign: 'center',
+  },
+  pendingWorkspaceContent: {
+    paddingHorizontal: 14,
+    paddingTop: 18,
+    paddingBottom: 196,
+    gap: 12,
+  },
+  pendingUserRow: {
+    alignItems: 'flex-end',
+    paddingLeft: 38,
+  },
+  pendingUserBubble: {
+    maxWidth: '100%',
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    borderRadius: 17,
+    borderCurve: 'continuous',
+    borderBottomRightRadius: 6,
+    backgroundColor: colors.ink,
+  },
+  pendingUserText: {
+    ...type.body,
+    color: colors.surface,
+  },
+  pendingHint: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 7,
+    paddingHorizontal: 4,
+  },
+  pendingHintText: {
+    ...type.caption,
+    flex: 1,
+    color: colors.muted,
+  },
   planOverview: { gap: 10 },
   bestPlanCard: {
     borderRadius: 16,
@@ -2191,7 +2514,7 @@ const styles = StyleSheet.create({
   itineraryContent: {
     paddingHorizontal: 14,
     paddingTop: 3,
-    paddingBottom: 118,
+    paddingBottom: 196,
     gap: 14,
   },
   dayTabs: { gap: 7, paddingRight: 12 },
@@ -2338,7 +2661,7 @@ const styles = StyleSheet.create({
   mapContent: {
     paddingHorizontal: 14,
     paddingTop: 4,
-    paddingBottom: 118,
+    paddingBottom: 196,
     gap: 12,
   },
   mapIntro: {
@@ -2363,7 +2686,7 @@ const styles = StyleSheet.create({
   detailsContent: {
     paddingHorizontal: 14,
     paddingTop: 4,
-    paddingBottom: 118,
+    paddingBottom: 196,
     gap: 11,
   },
   detailsHero: {
@@ -2406,27 +2729,11 @@ const styles = StyleSheet.create({
   detailCopy: { flex: 1 },
   detailLabel: { ...type.caption, color: colors.muted },
   detailValue: { ...type.label, color: colors.ink, marginTop: 1 },
-  taskDetail: {
-    minHeight: 52,
+  controlRow: {
+    minHeight: 66,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
-  },
-  taskDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: colors.lineStrong,
-  },
-  taskDotComplete: { backgroundColor: colors.green },
-  taskDotFailed: { backgroundColor: colors.coral },
-  taskDetailCopy: { flex: 1 },
-  taskDetailTitle: { ...type.caption, color: colors.ink },
-  taskDetailStatus: {
-    fontFamily: fonts.regular,
-    fontSize: 9,
-    color: colors.muted,
-    textTransform: 'capitalize',
   },
   standardScreen: { flex: 1, backgroundColor: colors.canvas },
   screenHeader: {
@@ -2581,6 +2888,22 @@ const styles = StyleSheet.create({
     borderRadius: 25,
     borderWidth: 3,
     borderColor: 'rgba(255,255,255,0.18)',
+  },
+  profileInitials: {
+    width: 76,
+    height: 76,
+    borderRadius: 25,
+    borderCurve: 'continuous',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surfaceViolet,
+    borderWidth: 3,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  profileInitialsText: {
+    fontFamily: fonts.bold,
+    fontSize: 28,
+    color: colors.primary,
   },
   profileBrand: {
     width: 76,

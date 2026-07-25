@@ -13,6 +13,7 @@ import httpx
 from app.config import Settings
 from app.interpreter import AIRPORTS
 from app.models import (
+    FlightLegOption,
     FlightOption,
     FlightSegment,
     HotelOption,
@@ -50,6 +51,83 @@ def _seed(constraints: TravelConstraints, namespace: str) -> random.Random:
 
 class DemoTravelProvider:
     name = "demo"
+
+    async def search_outbound_flights(
+        self,
+        constraints: TravelConstraints,
+    ) -> list[FlightLegOption]:
+        return await self._search_flight_leg(constraints, "outbound")
+
+    async def search_return_flights(
+        self,
+        constraints: TravelConstraints,
+    ) -> list[FlightLegOption]:
+        return await self._search_flight_leg(constraints, "return")
+
+    async def _search_flight_leg(
+        self,
+        constraints: TravelConstraints,
+        leg: str,
+    ) -> list[FlightLegOption]:
+        if not constraints.start_date or not constraints.end_date:
+            raise InvalidToolArguments("Dates are required for flight search")
+        is_return = leg == "return"
+        rng = _seed(constraints, f"{leg}-flights")
+        airlines = [
+            ("IndiGo", "6E"),
+            ("Air India", "AI"),
+            ("Akasa Air", "QP"),
+            ("SpiceJet", "SG"),
+            ("Air India Express", "IX"),
+            ("IndiGo", "6E"),
+        ]
+        departure_hours = [7, 9, 10, 12, 15, 18] if is_return else [6, 8, 9, 11, 14, 18]
+        travel_date = constraints.end_date if is_return else constraints.start_date
+        origin = (constraints.destination_airport if is_return else constraints.origin_airport) or (
+            "DST" if is_return else "ORG"
+        )
+        destination = (
+            constraints.origin_airport if is_return else constraints.destination_airport
+        ) or ("ORG" if is_return else "DST")
+        results: list[FlightLegOption] = []
+        for index, ((airline, code), hour) in enumerate(
+            zip(airlines, departure_hours, strict=True)
+        ):
+            duration = 145 + rng.randrange(0, 75)
+            departure_at = datetime.combine(
+                travel_date,
+                time(hour=hour, minute=(index * (13 if is_return else 11)) % 60),
+                tzinfo=IST,
+            )
+            arrival_at = departure_at + timedelta(minutes=duration)
+            per_person = (
+                (3_250 if is_return else 3_050)
+                + index * (390 if is_return else 360)
+                + rng.randrange(0, 520)
+            )
+            results.append(
+                FlightLegOption(
+                    id=f"demo-{leg}-flight-{index + 1}",
+                    provider=self.name,
+                    leg="return" if is_return else "outbound",
+                    segments=[
+                        FlightSegment(
+                            airline=airline,
+                            flight_number=f"{code} {(430 if is_return else 200) + index * 17}",
+                            departure_airport=origin,
+                            arrival_airport=destination,
+                            departure_at=departure_at,
+                            arrival_at=arrival_at,
+                            duration_minutes=duration,
+                        )
+                    ],
+                    total_price=per_person * constraints.adults,
+                    stops=0,
+                    baggage="7 kg cabin · 15 kg check-in",
+                )
+            )
+        await asyncio.sleep(0.3)
+        return results
 
     async def search_flights(self, constraints: TravelConstraints) -> list[FlightOption]:
         if not constraints.start_date or not constraints.end_date:
@@ -157,6 +235,82 @@ class SerpApiProvider:
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
         self.client = httpx.AsyncClient(timeout=35)
+
+    async def search_outbound_flights(
+        self,
+        constraints: TravelConstraints,
+    ) -> list[FlightLegOption]:
+        return await self._search_one_way(constraints, "outbound")
+
+    async def search_return_flights(
+        self,
+        constraints: TravelConstraints,
+    ) -> list[FlightLegOption]:
+        return await self._search_one_way(constraints, "return")
+
+    async def _search_one_way(
+        self,
+        constraints: TravelConstraints,
+        leg: str,
+    ) -> list[FlightLegOption]:
+        is_return = leg == "return"
+        travel_date = constraints.end_date if is_return else constraints.start_date
+        departure_id = constraints.destination_airport if is_return else constraints.origin_airport
+        arrival_id = constraints.origin_airport if is_return else constraints.destination_airport
+        if not travel_date or not departure_id or not arrival_id:
+            raise InvalidToolArguments("Resolved route and date are required for flight search")
+        params = {
+            "engine": "google_flights",
+            "api_key": self.api_key,
+            "departure_id": departure_id,
+            "arrival_id": arrival_id,
+            "outbound_date": travel_date.isoformat(),
+            "type": "2",
+            "currency": "INR",
+            "gl": "in",
+            "hl": "en",
+            "adults": constraints.adults,
+            "children": constraints.children,
+            "sort_by": "2",
+        }
+        response = await self.client.get("https://serpapi.com/search.json", params=params)
+        body = self._response_body(response, f"{leg} flight search")
+        candidates = (body.get("best_flights") or []) + (body.get("other_flights") or [])
+        results = [
+            normalized
+            for item in candidates[:14]
+            if (normalized := self._normalize_leg(item, constraints, leg)) is not None
+        ]
+        if not results:
+            raise NoResultsError(f"SerpApi returned no {leg} flights")
+        return results
+
+    def _normalize_leg(
+        self,
+        item: dict[str, Any],
+        constraints: TravelConstraints,
+        leg: str,
+    ) -> FlightLegOption | None:
+        is_return = leg == "return"
+        segments = self._normalize_segments(item, constraints, reverse=is_return)
+        price = item.get("price")
+        if not segments or not price:
+            return None
+        identifier = hashlib.sha1(f"{leg}|{item}".encode()).hexdigest()[:12]
+        extensions = list(item.get("extensions") or [])
+        baggage = next(
+            (str(value) for value in extensions if "bag" in str(value).lower()),
+            "Check fare rules with the provider",
+        )
+        return FlightLegOption(
+            id=f"serp-{leg}-{identifier}",
+            provider=self.name,
+            leg="return" if is_return else "outbound",
+            segments=segments,
+            total_price=math.ceil(float(price)),
+            stops=max(0, len(segments) - 1),
+            baggage=baggage,
+        )
 
     async def search_flights(self, constraints: TravelConstraints) -> list[FlightOption]:
         params = {
@@ -412,6 +566,68 @@ class AmadeusProvider:
                 seconds=int(body.get("expires_in", 1700))
             )
         return {"Authorization": f"Bearer {self._token}"}
+
+    async def search_outbound_flights(
+        self,
+        constraints: TravelConstraints,
+    ) -> list[FlightLegOption]:
+        return await self._search_one_way(constraints, "outbound")
+
+    async def search_return_flights(
+        self,
+        constraints: TravelConstraints,
+    ) -> list[FlightLegOption]:
+        return await self._search_one_way(constraints, "return")
+
+    async def _search_one_way(
+        self,
+        constraints: TravelConstraints,
+        leg: str,
+    ) -> list[FlightLegOption]:
+        is_return = leg == "return"
+        travel_date = constraints.end_date if is_return else constraints.start_date
+        origin = constraints.destination_airport if is_return else constraints.origin_airport
+        destination = constraints.origin_airport if is_return else constraints.destination_airport
+        if not travel_date or not origin or not destination:
+            raise InvalidToolArguments("Resolved route and date are required for flight search")
+        response = await self.client.get(
+            f"{self.base_url}/v2/shopping/flight-offers",
+            headers=await self._headers(),
+            params={
+                "originLocationCode": origin,
+                "destinationLocationCode": destination,
+                "departureDate": travel_date,
+                "adults": constraints.adults,
+                "children": constraints.children or None,
+                "currencyCode": "INR",
+                "max": 12,
+            },
+        )
+        if response.status_code in {408, 429, 500, 502, 503, 504}:
+            raise TemporaryToolError(f"Amadeus {leg} flight search returned {response.status_code}")
+        response.raise_for_status()
+        results: list[FlightLegOption] = []
+        for item in response.json().get("data", []):
+            itineraries = item.get("itineraries") or []
+            if not itineraries:
+                continue
+            segments = self._normalize_itinerary(itineraries[0])
+            if not segments:
+                continue
+            results.append(
+                FlightLegOption(
+                    id=f"amadeus-{leg}-{item['id']}",
+                    provider=self.name,
+                    leg="return" if is_return else "outbound",
+                    segments=segments,
+                    total_price=math.ceil(float(item["price"]["grandTotal"])),
+                    stops=max(0, len(segments) - 1),
+                    baggage="See airline fare conditions",
+                )
+            )
+        if not results:
+            raise NoResultsError(f"Amadeus returned no {leg} flights")
+        return results
 
     async def search_flights(self, constraints: TravelConstraints) -> list[FlightOption]:
         response = await self.client.get(
@@ -694,11 +910,7 @@ class TravelToolRegistry:
         return [provider.name for provider in self.providers]
 
     async def close(self) -> None:
-        clients = [
-            provider.client
-            for provider in self.providers
-            if hasattr(provider, "client")
-        ]
+        clients = [provider.client for provider in self.providers if hasattr(provider, "client")]
         clients.append(self.places.client)
         await asyncio.gather(
             *(client.aclose() for client in clients),
@@ -709,9 +921,7 @@ class TravelToolRegistry:
         self,
         constraints: TravelConstraints,
     ) -> tuple[str, str]:
-        origin = constraints.origin_airport or AIRPORTS.get(
-            (constraints.origin or "").lower()
-        )
+        origin = constraints.origin_airport or AIRPORTS.get((constraints.origin or "").lower())
         destination = constraints.destination_airport or AIRPORTS.get(
             (constraints.destination or "").lower()
         )
@@ -732,6 +942,29 @@ class TravelToolRegistry:
         constraints: TravelConstraints,
     ) -> list[HotelOption]:
         return await self.places.enrich_hotel_distances(hotels, constraints)
+
+
+def combine_flight_legs(
+    outbound: FlightLegOption,
+    inbound: FlightLegOption,
+) -> FlightOption:
+    return FlightOption(
+        id=f"{outbound.id}:{inbound.id}",
+        provider=(
+            outbound.provider
+            if outbound.provider == inbound.provider
+            else f"{outbound.provider}+{inbound.provider}"
+        ),
+        outbound=outbound.segments,
+        inbound=inbound.segments,
+        total_price=outbound.total_price + inbound.total_price,
+        stops=outbound.stops + inbound.stops,
+        baggage=(
+            outbound.baggage
+            if outbound.baggage == inbound.baggage
+            else "Check each selected leg's fare rules"
+        ),
+    )
 
 
 def _haversine_km(

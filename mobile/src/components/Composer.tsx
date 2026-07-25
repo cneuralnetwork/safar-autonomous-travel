@@ -1,6 +1,5 @@
 import { forwardRef, useState } from 'react';
 import {
-  ActivityIndicator,
   Pressable,
   StyleSheet,
   TextInput,
@@ -40,7 +39,9 @@ export const Composer = forwardRef<TextInputType, ComposerProps>(function Compos
   const submit = async () => {
     const cleaned = text.trim();
     if (!cleaned || busy) return;
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(
+      () => undefined,
+    );
     setText('');
     await onSend(cleaned);
   };
@@ -50,7 +51,7 @@ export const Composer = forwardRef<TextInputType, ComposerProps>(function Compos
       <View style={[styles.shell, isCompact && styles.shellCompact]}>
         {!isCompact ? (
           <View style={styles.promptMark}>
-            <Ionicons name="sparkles" color={colors.primary} size={21} />
+            <Ionicons name="compass-outline" color={colors.primary} size={22} />
           </View>
         ) : null}
         <TextInput
@@ -62,7 +63,7 @@ export const Composer = forwardRef<TextInputType, ComposerProps>(function Compos
           multiline
           maxLength={4000}
           returnKeyType="send"
-          blurOnSubmit={false}
+          submitBehavior="submit"
           onSubmitEditing={() => void submit()}
           textAlignVertical="top"
           style={[styles.input, isCompact && styles.inputCompact]}
@@ -81,15 +82,11 @@ export const Composer = forwardRef<TextInputType, ComposerProps>(function Compos
           accessibilityLabel="Send message"
           accessibilityState={{ disabled: isEmpty || busy, busy }}
         >
-          {busy ? (
-            <ActivityIndicator color={colors.surface} size="small" />
-          ) : (
-            <Ionicons
-              name="arrow-up"
-              color={colors.surface}
-              size={isCompact ? 20 : 22}
-            />
-          )}
+          <Ionicons
+            name={busy ? 'sparkles' : 'arrow-up'}
+            color={colors.surface}
+            size={isCompact ? 20 : 22}
+          />
         </Pressable>
       </View>
     </View>
@@ -100,7 +97,9 @@ const styles = StyleSheet.create({
   frame: {
     width: '100%',
     padding: 5,
-    borderRadius: 30,
+    borderRadius: 20,
+    borderCurve: 'continuous',
+    overflow: 'visible',
     backgroundColor: colors.primarySoft,
     borderWidth: 1,
     borderColor: colors.line,
@@ -109,6 +108,7 @@ const styles = StyleSheet.create({
   frameCompact: {
     padding: 3,
     borderRadius: 25,
+    borderCurve: 'continuous',
   },
   shell: {
     minHeight: 104,
@@ -118,7 +118,8 @@ const styles = StyleSheet.create({
     gap: 8,
     padding: 11,
     paddingLeft: 13,
-    borderRadius: 25,
+    borderRadius: 16,
+    borderCurve: 'continuous',
     backgroundColor: colors.surfaceViolet,
     borderWidth: 1,
     borderColor: colors.line,
@@ -129,6 +130,7 @@ const styles = StyleSheet.create({
     padding: 7,
     paddingLeft: 14,
     borderRadius: 22,
+    borderCurve: 'continuous',
     backgroundColor: colors.surface,
   },
   promptMark: {

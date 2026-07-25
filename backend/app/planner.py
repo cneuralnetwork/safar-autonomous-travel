@@ -7,8 +7,12 @@ ALLOWED_TOOLS = {
     "interpret_request",
     "resolve_constraints",
     "resolve_locations",
-    "search_flights",
+    "search_outbound_flights",
+    "choose_outbound_flight",
+    "search_return_flights",
+    "choose_return_flight",
     "search_hotels",
+    "choose_hotel",
     "compare_options",
     "search_places",
     "create_itinerary",
@@ -23,11 +27,7 @@ def build_task_graph(
     draft: AgentPlanDraft | None = None,
 ) -> TaskGraph:
     destination = constraints.destination or "your destination"
-    draft_by_tool = (
-        {task.tool_name: task for task in draft.tasks}
-        if draft
-        else {}
-    )
+    draft_by_tool = {task.tool_name: task for task in draft.tasks} if draft else {}
 
     def task(
         *,
@@ -91,25 +91,53 @@ def build_task_graph(
             ),
         ),
         task(
-            task_id="flight_search",
-            tool_name="search_flights",
-            title="Search flights",
-            description="Search outbound and return flights matching the validated constraints",
+            task_id="outbound_flight_search",
+            tool_name="search_outbound_flights",
+            title="Find flights there",
+            description="Search one-way departure options matching the route and timing",
             dependencies=["resolve_locations"],
+        ),
+        task(
+            task_id="choose_outbound_flight",
+            tool_name="choose_outbound_flight",
+            title="Choose your flight there",
+            description="Pause so the traveller can choose or change the outbound flight",
+            dependencies=["outbound_flight_search"],
+        ),
+        task(
+            task_id="return_flight_search",
+            tool_name="search_return_flights",
+            title="Find flights back",
+            description="Make a separate one-way search for the return date",
+            dependencies=["choose_outbound_flight"],
+        ),
+        task(
+            task_id="choose_return_flight",
+            tool_name="choose_return_flight",
+            title="Choose your flight back",
+            description="Pause so the traveller can choose or change the return flight",
+            dependencies=["return_flight_search"],
         ),
         task(
             task_id="hotel_search",
             tool_name="search_hotels",
-            title="Search hotels",
+            title="Find stays",
             description="Search available hotels matching the area preference",
-            dependencies=["resolve_locations"],
+            dependencies=["choose_return_flight"],
+        ),
+        task(
+            task_id="choose_hotel",
+            tool_name="choose_hotel",
+            title="Choose your stay",
+            description="Pause so the traveller can choose or change the hotel",
+            dependencies=["hotel_search"],
         ),
         task(
             task_id="place_search",
             tool_name="search_places",
             title=f"Find things to do in {destination}",
             description="Search relevant activities and landmarks with verified locations",
-            dependencies=["resolve_locations"],
+            dependencies=["choose_hotel"],
             optional=True,
         ),
         task(
@@ -117,7 +145,7 @@ def build_task_graph(
             tool_name="compare_options",
             title="Compare combinations",
             description="Validate and rank flight-hotel packages deterministically",
-            dependencies=["flight_search", "hotel_search"],
+            dependencies=["choose_return_flight", "choose_hotel"],
         ),
         task(
             task_id="create_itinerary",
@@ -129,15 +157,15 @@ def build_task_graph(
         task(
             task_id="request_approval",
             tool_name="request_approval",
-            title="Request approval",
-            description="Ask before creating Google Calendar events",
+            title="Offer calendar export",
+            description="Let the traveller review the plan before exporting it",
             dependencies=["create_itinerary"],
         ),
         task(
             task_id="add_calendar",
             tool_name="add_calendar_events",
-            title="Add to Calendar",
-            description="Create only explicitly approved Google Calendar events",
+            title="Prepare calendar file",
+            description="Prepare a portable ICS file for any calendar app",
             dependencies=["request_approval"],
         ),
         task(
@@ -151,11 +179,7 @@ def build_task_graph(
     if any(item.tool_name not in ALLOWED_TOOLS for item in tasks):
         raise ValueError("Planner emitted an unregistered tool")
     return TaskGraph(
-        goal=(
-            draft.goal
-            if draft
-            else f"Plan a trip from {constraints.origin} to {destination}"
-        ),
+        goal=(draft.goal if draft else f"Plan a trip from {constraints.origin} to {destination}"),
         constraints=constraints,
         tasks=tasks,
         estimated_steps=len(tasks),

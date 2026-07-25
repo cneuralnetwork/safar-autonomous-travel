@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 
 from app.agent_model import (
     ModelMetrics,
+    SarvamModelError,
     StructuredModelResult,
     TravelConstraintPatch,
     TurnInterpretation,
@@ -25,6 +26,7 @@ async def test_extracts_complete_goa_prompt() -> None:
     assert constraints.destination == "Goa"
     assert constraints.origin_airport == "CCU"
     assert constraints.destination_airport == "GOI"
+    assert constraints.visual_theme == "coast"
     assert constraints.start_date == date(2026, 7, 31)
     assert constraints.end_date == date(2026, 8, 2)
     assert constraints.adults == 2
@@ -89,6 +91,7 @@ async def test_sarvam_fields_merge_with_validated_next_weekend_dates() -> None:
                     origin_airport="DEL",
                     destination="Jaipur",
                     destination_airport="BOM",
+                    visual_theme="heritage",
                     budget=40_000,
                     adults=1,
                 ),
@@ -119,12 +122,98 @@ async def test_sarvam_fields_merge_with_validated_next_weekend_dates() -> None:
     assert outcome.constraints.origin_airport == "MAA"
     assert outcome.constraints.destination == "Jaipur"
     assert outcome.constraints.destination_airport == "JAI"
+    assert outcome.constraints.visual_theme == "heritage"
     assert outcome.constraints.start_date == date(2026, 7, 31)
     assert outcome.constraints.end_date == date(2026, 8, 2)
     assert outcome.constraints.budget == 40_000
     assert outcome.constraints.missing_fields == []
     assert outcome.model_metrics is not None
     interpreter.agent.interpret.assert_awaited_once()
+    await interpreter.gateway.close()
+
+
+async def test_destination_change_refreshes_the_visual_theme() -> None:
+    interpreter = RequestInterpreter(Settings(sarvam_api_key=None))
+    original = await interpreter.interpret(
+        "plan a trip from Kolkata to Chennai next weekend",
+        today=date(2026, 7, 25),
+    )
+    changed = await interpreter.interpret(
+        "Actually, go to Manali from Kolkata next weekend",
+        original,
+        today=date(2026, 7, 25),
+    )
+
+    assert original.visual_theme == "coast"
+    assert changed.destination == "Manali"
+    assert changed.visual_theme == "mountains"
+
+
+async def test_sarvam_visual_theme_overrides_the_generic_fallback() -> None:
+    interpreter = RequestInterpreter(Settings(sarvam_api_key="test-key"))
+    interpreter.agent.interpret = AsyncMock(
+        return_value=StructuredModelResult(
+            value=TurnInterpretation(
+                intent="plan_trip",
+                constraints=TravelConstraintPatch(
+                    origin="Chennai",
+                    destination="Rameswaram",
+                    visual_theme="coast",
+                ),
+                explicit_fields=["origin", "destination"],
+                assistant_message="I’ll plan a coastal Rameswaram trip.",
+            ),
+            metrics=ModelMetrics(
+                phase="interpretation",
+                model="sarvam-105b",
+                prompt_version="travel-turn-v3",
+                status="completed",
+                attempts=1,
+                latency_ms=280,
+            ),
+        )
+    )
+
+    outcome = await interpreter.interpret_turn(
+        "Plan a trip from Chennai to Rameswaram next weekend",
+        today=date(2026, 7, 25),
+    )
+
+    assert outcome.constraints.destination == "Rameswaram"
+    assert outcome.constraints.visual_theme == "coast"
+    await interpreter.gateway.close()
+
+
+async def test_sarvam_failure_falls_back_to_deterministic_interpretation() -> None:
+    interpreter = RequestInterpreter(Settings(sarvam_api_key="test-key"))
+    failed_metrics = ModelMetrics(
+        phase="interpretation",
+        model="sarvam-105b",
+        prompt_version="travel-turn-v3",
+        status="failed",
+        attempts=2,
+        latency_ms=50_000,
+        error_code="truncated_model_output",
+        error_message="Structured output ended early",
+    )
+    interpreter.agent.interpret = AsyncMock(
+        side_effect=SarvamModelError(
+            "Structured output ended early",
+            failed_metrics,
+        )
+    )
+
+    outcome = await interpreter.interpret_turn(
+        "I wanna go to Goa from Guwahati",
+        today=date(2026, 7, 25),
+    )
+
+    assert outcome.constraints.origin == "Guwahati"
+    assert outcome.constraints.destination == "Goa"
+    assert outcome.constraints.visual_theme == "coast"
+    assert outcome.constraints.missing_fields == ["start_date", "end_date"]
+    assert outcome.model_metrics == failed_metrics
+    assert outcome.quick_replies
     await interpreter.gateway.close()
 
 

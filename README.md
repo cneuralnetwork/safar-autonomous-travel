@@ -1,10 +1,10 @@
 # Safar — autonomous travel planning, in one conversation
 
 Safar is a mobile-first autonomous travel agent. A traveller describes a trip in
-plain language, Safar resolves missing details in chat, searches flights and
-hotels in parallel, applies hard budget and preference constraints, builds a
-day-by-day itinerary, asks for approval, and then writes the approved plan to
-Google Calendar.
+plain language, Safar resolves missing details in chat, searches outbound and
+return flights separately, pauses for the traveller to choose each flight and
+stay, applies hard constraints, and builds a day-by-day itinerary. The finished
+plan can be downloaded as a portable calendar file.
 
 The repository contains:
 
@@ -17,14 +17,16 @@ The repository contains:
 
 - No travel forms: every clarification happens in the conversation.
 - Google is the only sign-in method.
-- Search and planning are safe; calendar writes always require approval.
+- Search and planning are safe; Safar never books or spends money.
+- Outbound flight, return flight, and stay choices are persisted independently
+  and can be changed by tapping a card or speaking naturally in chat.
 - The LLM interprets intent, while deterministic code enforces constraints.
 - Every task, retry, fallback, rejection, and external action is recorded.
 - Sarvam plans and replans through strict schemas; it cannot invent or execute
   tools outside Safar's registry.
 - Past trips and reusable preferences are persisted per Google account.
 - Interrupted planned/running workflows resume from persisted state after a
-  service restart; Calendar writes never resume without approval.
+  service restart; traveller choice checkpoints never auto-select an option.
 - Real providers activate when configured. Deterministic demo providers keep
   local development and automated tests reliable.
 
@@ -56,9 +58,10 @@ Scan the QR code with the current Expo Go client.
 ## Configuration
 
 The application boots with demo travel providers when their live credentials are
-missing. Google sign-in and Calendar require the corresponding Google and
-Supabase configuration. See [API_SETUP.md](API_SETUP.md) for the exact dashboard
-steps, redirect URLs, scopes, and environment variables.
+missing. Google sign-in requires the corresponding Google and Supabase
+configuration. Calendar export is local and requires no calendar-account access.
+See [API_SETUP.md](API_SETUP.md) for the exact dashboard steps, redirect URLs,
+scopes, and environment variables.
 
 ## Architecture
 
@@ -70,11 +73,11 @@ FastAPI API ── OAuth bridge ── Google / Supabase Auth
     │
     ├── Sarvam controller (interpret, plan, replan)
     ├── normalized, validated task graph
-    ├── parallel travel tools
+    ├── outbound choice → return choice → stay choice
     ├── deterministic constraint solver
     ├── retry + fallback policy
     ├── itinerary composer
-    └── approval gate ───────── Google Calendar
+    └── portable ICS export
     │
     ▼
 Supabase Postgres + RLS + append-only events

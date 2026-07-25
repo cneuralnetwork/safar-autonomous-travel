@@ -5,7 +5,7 @@ from html import escape
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
@@ -17,7 +17,6 @@ from app.auth import (
     GoogleAuthStartResponse,
     get_current_user,
 )
-from app.calendar_service import CalendarService
 from app.config import Settings, get_settings
 from app.interpreter import RequestInterpreter
 from app.models import (
@@ -29,10 +28,11 @@ from app.models import (
     ExecutionReport,
     RunState,
     SendMessageRequest,
+    TripSelectionRequest,
     UserIdentity,
 )
-from app.orchestrator import CalendarConnectionRequired, Orchestrator
-from app.store import TokenCipher, create_store
+from app.orchestrator import Orchestrator
+from app.store import create_store
 from app.travel_tools import TravelToolRegistry
 
 AuthenticatedUser = Annotated[UserIdentity, Depends(get_current_user)]
@@ -48,18 +48,14 @@ async def lifespan(app: FastAPI):
     store = create_store(settings)
     await store.initialize()
     sarvam_gateway = SarvamGateway(settings)
-    cipher = TokenCipher(settings.token_encryption_key)
-    calendar = CalendarService(settings, store, cipher)
     app.state.settings = settings
     app.state.store = store
     app.state.auth_bridge = GoogleAuthBridge(settings)
-    app.state.calendar = calendar
     app.state.sarvam_gateway = sarvam_gateway
     app.state.orchestrator = Orchestrator(
         store,
         RequestInterpreter(settings, sarvam_gateway),
         TravelToolRegistry(settings),
-        calendar,
     )
     await app.state.orchestrator.recover_pending_runs()
     try:
@@ -67,7 +63,6 @@ async def lifespan(app: FastAPI):
     finally:
         await app.state.orchestrator.close()
         await app.state.auth_bridge.close()
-        await calendar.close()
         await sarvam_gateway.close()
         await store.close()
 
@@ -77,7 +72,7 @@ app = FastAPI(
     version="0.1.0",
     description=(
         "Conversation-first autonomous travel planning with deterministic constraints "
-        "and approval-gated Google Calendar writes."
+        "and portable calendar exports."
     ),
     lifespan=lifespan,
 )
@@ -93,10 +88,6 @@ app.add_middleware(
 
 def orchestrator(request: Request) -> Orchestrator:
     return request.app.state.orchestrator
-
-
-def calendar_service(request: Request) -> CalendarService:
-    return request.app.state.calendar
 
 
 @app.get("/", tags=["system"])
@@ -120,9 +111,9 @@ async def health(request: Request) -> dict[str, object]:
         "travel_providers": tools.provider_names(),
         "sarvam": bool(app_settings.sarvam_api_key),
         "sarvam_model": app_settings.sarvam_model,
-        "agent_harness": "v2",
+        "agent_harness": "v3",
         "google_auth": app_settings.google_auth_ready,
-        "calendar": bool(app_settings.google_client_id and app_settings.google_client_secret),
+        "ics_export": True,
     }
 
 
@@ -234,6 +225,25 @@ async def send_message(
 
 
 @app.post(
+    "/v1/runs/{run_id}/selections",
+    response_model=RunState,
+    tags=["runs"],
+)
+async def select_trip_option(
+    run_id: UUID,
+    payload: TripSelectionRequest,
+    request: Request,
+    user: AuthenticatedUser,
+) -> RunState:
+    try:
+        return await orchestrator(request).select_option(user, run_id, payload)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post(
     "/v1/runs/{run_id}/approvals",
     response_model=RunState,
     tags=["approvals"],
@@ -246,14 +256,6 @@ async def resolve_approval(
 ) -> RunState:
     try:
         return await orchestrator(request).approve(user, run_id, payload)
-    except CalendarConnectionRequired as error:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "calendar_connection_required",
-                "message": str(error),
-            },
-        ) from error
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except ValueError as error:
@@ -301,60 +303,6 @@ async def list_run_events(
         items=items,
         next_after=items[-1].id if items and items[-1].id is not None else after,
     )
-
-
-@app.post("/v1/calendar/connect", tags=["calendar"])
-async def connect_calendar(
-    request: Request,
-    user: AuthenticatedUser,
-) -> dict[str, object]:
-    try:
-        return calendar_service(request).start(user)
-    except RuntimeError as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
-
-
-@app.get("/v1/calendar/callback", response_class=HTMLResponse, tags=["calendar"])
-async def calendar_callback(
-    request: Request,
-    state: str | None = Query(default=None),
-    code: str | None = Query(default=None),
-    error: str | None = Query(default=None),
-) -> HTMLResponse:
-    try:
-        attempt = await calendar_service(request).callback(state, code, error)
-        success = attempt.status == "completed"
-        title = "Calendar connected" if success else "Calendar wasn’t connected"
-        message = (
-            "Return to Safar to approve the calendar events."
-            if success
-            else escape(attempt.error or "Return to Safar and try again.")
-        )
-        return _oauth_result_page(title, message, success)
-    except Exception as callback_error:
-        return _oauth_result_page("Calendar wasn’t connected", escape(str(callback_error)), False)
-
-
-@app.get("/v1/calendar/status", tags=["calendar"])
-async def calendar_status(
-    request: Request,
-    user: AuthenticatedUser,
-) -> dict[str, object]:
-    return await calendar_service(request).status(user.id)
-
-
-@app.delete(
-    "/v1/calendar/connection",
-    status_code=status.HTTP_204_NO_CONTENT,
-    response_class=Response,
-    tags=["calendar"],
-)
-async def disconnect_calendar(
-    request: Request,
-    user: AuthenticatedUser,
-) -> Response:
-    await calendar_service(request).disconnect(user.id)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 def _oauth_result_page(title: str, message: str, success: bool) -> HTMLResponse:

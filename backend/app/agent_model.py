@@ -13,11 +13,16 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.config import Settings
+from app.models import VisualTheme
 
 AllowedToolName = Literal[
     "resolve_locations",
-    "search_flights",
+    "search_outbound_flights",
+    "choose_outbound_flight",
+    "search_return_flights",
+    "choose_return_flight",
     "search_hotels",
+    "choose_hotel",
     "compare_options",
     "search_places",
     "create_itinerary",
@@ -36,6 +41,7 @@ class TravelConstraintPatch(StrictModel):
     origin_airport: str | None = None
     destination: str | None = None
     destination_airport: str | None = None
+    visual_theme: VisualTheme | None = None
     start_date: date | None = None
     end_date: date | None = None
     duration_days: int | None = Field(default=None, ge=1, le=30)
@@ -74,7 +80,7 @@ class PlanTaskDraft(StrictModel):
 class AgentPlanDraft(StrictModel):
     goal: str
     assumptions: list[str] = Field(default_factory=list)
-    tasks: list[PlanTaskDraft] = Field(min_length=1, max_length=12)
+    tasks: list[PlanTaskDraft] = Field(min_length=1, max_length=16)
 
 
 class ReplanDecision(StrictModel):
@@ -190,30 +196,24 @@ class SarvamGateway:
             },
         }
 
+        retryable_status_codes = {408, 409, 429, 500, 502, 503, 504}
         for attempt in range(3):
             attempts = attempt + 1
+            finish_reason: str | None = None
             try:
                 response = await self.client.post(self.endpoint, json=request_body)
                 if response.status_code >= 400:
                     error_payload = _safe_json(response)
                     error_detail = error_payload.get("error")
                     if isinstance(error_detail, dict):
-                        last_code = str(
-                            error_detail.get("code")
-                            or f"http_{response.status_code}"
-                        )
-                        last_message = str(
-                            error_detail.get("message")
-                            or "Sarvam request failed"
-                        )
+                        last_code = str(error_detail.get("code") or f"http_{response.status_code}")
+                        last_message = str(error_detail.get("message") or "Sarvam request failed")
                     else:
                         last_code = f"http_{response.status_code}"
                         last_message = (
-                            str(error_detail)
-                            if error_detail
-                            else "Sarvam request failed"
+                            str(error_detail) if error_detail else "Sarvam request failed"
                         )
-                    if response.status_code not in {429, 500, 503}:
+                    if response.status_code not in retryable_status_codes:
                         break
                     if attempt < 2:
                         await asyncio.sleep((2**attempt) + random.uniform(0.05, 0.25))
@@ -221,7 +221,9 @@ class SarvamGateway:
                     break
 
                 body = response.json()
-                content = body["choices"][0]["message"].get("content")
+                choice = body["choices"][0]
+                finish_reason = choice.get("finish_reason")
+                content = choice["message"].get("content")
                 if not content:
                     raise ValueError("Sarvam returned no structured content")
                 value = schema.model_validate_json(content)
@@ -245,8 +247,15 @@ class SarvamGateway:
                     await asyncio.sleep((2**attempt) + random.uniform(0.05, 0.25))
                     continue
             except (KeyError, ValueError, ValidationError, json.JSONDecodeError) as error:
-                last_code = "invalid_model_output"
-                last_message = str(error)[:300]
+                if finish_reason == "length":
+                    last_code = "truncated_model_output"
+                    last_message = (
+                        "Sarvam reached the output-token limit before completing "
+                        "the structured response"
+                    )
+                else:
+                    last_code = "invalid_model_output"
+                    last_message = str(error)[:300]
                 if attempt < 1:
                     request_body["messages"].append(
                         {
@@ -288,16 +297,22 @@ class SarvamAgent:
     ) -> StructuredModelResult[TurnInterpretation]:
         return await self.gateway.structured(
             phase="interpretation",
-            prompt_version="travel-turn-v2",
+            prompt_version="travel-turn-v3",
             schema=TurnInterpretation,
             reasoning_effort=None,
+            max_tokens=4096,
             system=(
                 "You are Safar's travel request interpreter. Extract only facts supported by the "
                 "message or existing confirmed state. Infer normal defaults instead of asking "
                 "unnecessary questions: one adult if omitted, and Friday through Sunday for "
                 "'next weekend'. Preserve confirmed values unless the user changes them. Budget "
                 "is optional. Never invent an origin, destination, exact date, airport code, "
-                "price, or provider result. Write a concise, natural assistant_message. Ask at "
+                "price, or provider result. When a destination is known, classify its dominant "
+                "travel visual as exactly one visual_theme: coast for beaches and seaside cities; "
+                "mountains for hill, alpine, or high-altitude destinations; heritage for forts, "
+                "temples, and historic architecture; nature for forests, backwaters, and lush "
+                "landscapes; or city for modern urban destinations. Chennai is coast. Write a "
+                "concise, natural assistant_message. Ask at "
                 "most one consolidated question when a required route/date fact is truly "
                 "ambiguous. Return no chain-of-thought."
             ),
@@ -326,10 +341,14 @@ class SarvamAgent:
             max_tokens=3200,
             system=(
                 "Create a compact dependency DAG for a travel-planning run using only the "
-                "registered tools. Flight and hotel searches should run in parallel. "
-                "compare_options depends on both searches; create_itinerary depends on a valid "
-                "package and place search; request_approval must precede add_calendar_events. "
-                "Calendar is the only write action and must remain approval-gated. Do not add "
+                "registered tools. Search outbound flights first, pause for the traveller's "
+                "choice, then make a separate return-flight request and pause again. Search "
+                "hotels only after both flight choices, then pause for the stay choice. "
+                "compare_options validates the three chosen items; create_itinerary depends on "
+                "a valid package and place search; request_approval must precede "
+                "add_calendar_events. "
+                "The calendar step prepares a portable ICS export and never writes directly "
+                "to a calendar account. Do not add "
                 "booking, payment, messaging, code execution, browsing, or arbitrary tools. "
                 "Return operational descriptions, not chain-of-thought."
             ),
@@ -338,8 +357,12 @@ class SarvamAgent:
                 "assumptions": assumptions,
                 "registered_tools": [
                     "resolve_locations",
-                    "search_flights",
+                    "search_outbound_flights",
+                    "choose_outbound_flight",
+                    "search_return_flights",
+                    "choose_return_flight",
                     "search_hotels",
+                    "choose_hotel",
                     "compare_options",
                     "search_places",
                     "create_itinerary",
@@ -348,8 +371,12 @@ class SarvamAgent:
                     "create_report",
                 ],
                 "hard_rules": {
-                    "max_tasks": 12,
-                    "parallel_searches": True,
+                    "max_tasks": 16,
+                    "selection_order": [
+                        "outbound_flight",
+                        "return_flight",
+                        "hotel",
+                    ],
                     "approval_before_calendar": True,
                 },
             },

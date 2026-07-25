@@ -4,6 +4,7 @@ import type {
   Conversation,
   ConversationSnapshot,
   RunState,
+  SelectionKind,
 } from '@/types';
 
 const baseUrl =
@@ -124,27 +125,21 @@ export const api = {
     });
   },
 
-  calendarStatus(accessToken: string) {
-    return apiRequest<{
-      connected: boolean;
-      authorization_status?: 'pending' | 'completed' | 'failed';
-      error?: string;
-    }>('/v1/calendar/status', accessToken);
-  },
-
-  connectCalendar(accessToken: string) {
-    return apiRequest<{ authorization_url: string; expires_in: number }>(
-      '/v1/calendar/connect',
-      accessToken,
-      { method: 'POST' },
-    );
-  },
-
-  disconnectCalendar(accessToken: string) {
-    return apiRequest<void>('/v1/calendar/connection', accessToken, {
-      method: 'DELETE',
+  selectOption(
+    accessToken: string,
+    runId: string,
+    kind: SelectionKind,
+    optionId: string,
+  ) {
+    return apiRequest<RunState>(`/v1/runs/${runId}/selections`, accessToken, {
+      method: 'POST',
+      body: JSON.stringify({
+        kind,
+        option_id: optionId,
+      }),
     });
   },
+
 };
 
 export const authApi = {

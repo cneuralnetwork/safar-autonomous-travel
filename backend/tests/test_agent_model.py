@@ -1,12 +1,16 @@
 import json
 
 import httpx
+import pytest
 
 from app.agent_model import SarvamGateway, TravelConstraintPatch
 from app.config import Settings
 
 
-async def test_sarvam_gateway_retries_transient_errors_and_records_usage() -> None:
+@pytest.mark.parametrize("transient_status", [409, 429, 503])
+async def test_sarvam_gateway_retries_transient_errors_and_records_usage(
+    transient_status: int,
+) -> None:
     attempts = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -14,8 +18,8 @@ async def test_sarvam_gateway_retries_transient_errors_and_records_usage() -> No
         attempts += 1
         if attempts == 1:
             return httpx.Response(
-                429,
-                json={"error": {"code": "rate_limit_exceeded_error", "message": "slow down"}},
+                transient_status,
+                json={"error": {"code": "temporary_error", "message": "try again"}},
             )
         return httpx.Response(
             200,

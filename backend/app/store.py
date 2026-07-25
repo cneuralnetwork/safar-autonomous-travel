@@ -562,7 +562,7 @@ class SupabaseStore(Store):
 
     async def initialize(self) -> None:
         required_schema = {
-            "conversations": "id",
+            "conversations": "id,visual_theme",
             "runs": "id,harness_version,phase",
             "run_tasks": "run_id,task_id",
             "agent_events": "id",

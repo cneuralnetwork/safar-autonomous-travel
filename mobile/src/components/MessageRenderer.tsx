@@ -12,27 +12,37 @@ import { Ionicons } from '@expo/vector-icons';
 import type {
   Approval,
   ChatMessage,
+  FlightLegOption,
   FlightOption,
   HotelOption,
   Itinerary,
   ItineraryItem,
   OperationEvent,
   PackageOption,
+  SelectionKind,
   TaskGraph,
   TaskStatus,
   TravelConstraints,
+  VisualTheme,
 } from '@/types';
 import { colors, radius, shadow, type } from '@/theme';
 import { formatCurrency, formatDate, formatTime } from '@/utils/format';
 import { ItineraryMap } from '@/components/ItineraryMap';
-import { tripImageForKey } from '@/lib/tripImages';
+import { tripImageForTrip } from '@/lib/tripImages';
 
 interface MessageRendererProps {
   message: ChatMessage;
   activeGraph?: TaskGraph;
-  onQuickReply: (text: string) => void;
   onApproval: (decision: 'approve' | 'edit' | 'cancel') => void;
+  onCalendarExport: () => void;
+  onSelectOption: (kind: SelectionKind, optionId: string) => void;
   approvalBusy: boolean;
+  selectionBusy: boolean;
+  selectedOutboundId?: string;
+  selectedReturnId?: string;
+  selectedHotelId?: string;
+  destination?: string;
+  visualTheme?: VisualTheme;
 }
 
 type IconName = keyof typeof Ionicons.glyphMap;
@@ -43,6 +53,7 @@ const STATUS_COLORS: Record<TaskStatus, string> = {
   completed: colors.green,
   retrying: colors.amber,
   failed: colors.coral,
+  awaiting_input: colors.info,
   awaiting_approval: colors.info,
   skipped: colors.faint,
 };
@@ -65,14 +76,19 @@ const CATEGORY_COLORS: Record<ItineraryItem['category'], string> = {
   buffer: colors.faint,
 };
 
-const genericDestination = require('../../assets/generated/destination-fallback.png');
-
 export const MessageRenderer = memo(function MessageRenderer({
   message,
   activeGraph,
-  onQuickReply,
   onApproval,
+  onCalendarExport,
+  onSelectOption,
   approvalBusy,
+  selectionBusy,
+  selectedOutboundId,
+  selectedReturnId,
+  selectedHotelId,
+  destination,
+  visualTheme,
 }: MessageRendererProps) {
   if (message.role === 'user') {
     return (
@@ -97,13 +113,7 @@ export const MessageRenderer = memo(function MessageRenderer({
         />
       );
     case 'clarification':
-      return (
-        <ClarificationCard
-          text={message.text}
-          replies={(message.payload.quick_replies as string[]) || []}
-          onReply={onQuickReply}
-        />
-      );
+      return <ClarificationCard text={message.text} />;
     case 'task_graph':
       return (
         <TaskGraphCard
@@ -114,8 +124,44 @@ export const MessageRenderer = memo(function MessageRenderer({
       return <OperationRow event={message.payload.event as OperationEvent} />;
     case 'flight_options':
       return <FlightCards flights={(message.payload.flights as FlightOption[]) || []} />;
+    case 'flight_selection': {
+      const selectionKind = message.payload.selection_kind as SelectionKind;
+      return (
+        <FlightSelectionCards
+          flights={(message.payload.flights as FlightLegOption[]) || []}
+          kind={selectionKind}
+          selectedId={
+            selectionKind === 'return_flight'
+              ? selectedReturnId
+              : selectedOutboundId
+          }
+          busy={selectionBusy}
+          onSelect={onSelectOption}
+        />
+      );
+    }
     case 'hotel_options':
-      return <HotelCards hotels={(message.payload.hotels as HotelOption[]) || []} />;
+      return (
+        <HotelCards
+          hotels={(message.payload.hotels as HotelOption[]) || []}
+          destination={destination}
+          visualTheme={visualTheme}
+        />
+      );
+    case 'hotel_selection':
+      return (
+        <HotelCards
+          hotels={(message.payload.hotels as HotelOption[]) || []}
+          destination={destination}
+          visualTheme={visualTheme}
+          selectionKind="hotel"
+          selectedId={selectedHotelId}
+          busy={selectionBusy}
+          onSelect={onSelectOption}
+        />
+      );
+    case 'selection_confirmation':
+      return <SelectionConfirmation text={message.text} />;
     case 'budget':
       return (
         <BudgetCard
@@ -124,7 +170,13 @@ export const MessageRenderer = memo(function MessageRenderer({
         />
       );
     case 'itinerary':
-      return <ItineraryCard itinerary={message.payload.itinerary as Itinerary} />;
+      return (
+        <ItineraryCard
+          itinerary={message.payload.itinerary as Itinerary}
+          destination={destination}
+          visualTheme={visualTheme}
+        />
+      );
     case 'approval':
       return (
         <ApprovalCard
@@ -137,7 +189,10 @@ export const MessageRenderer = memo(function MessageRenderer({
       return (
         <CalendarResult
           text={message.text}
-          links={(message.payload.links as string[]) || []}
+          busy={approvalBusy}
+          onExport={onCalendarExport}
+          destination={destination}
+          visualTheme={visualTheme}
         />
       );
     case 'report':
@@ -267,15 +322,7 @@ function InterpretationCard({
   );
 }
 
-function ClarificationCard({
-  text,
-  replies,
-  onReply,
-}: {
-  text: string;
-  replies: string[];
-  onReply: (text: string) => void;
-}) {
+function ClarificationCard({ text }: { text: string }) {
   return (
     <View style={styles.assistantBlock}>
       <View style={styles.assistantMark}>
@@ -284,24 +331,6 @@ function ClarificationCard({
       <View style={styles.assistantCopy}>
         <Text style={styles.assistantLabel}>Safar needs one detail</Text>
         <Text style={styles.assistantText}>{text}</Text>
-        {replies.length ? (
-          <View style={styles.replyStack}>
-            {replies.map((reply) => (
-              <Pressable
-                key={reply}
-                accessibilityRole="button"
-                accessibilityLabel={reply}
-                onPress={() => onReply(reply)}
-                style={({ pressed }) => [styles.reply, pressed && styles.pressed]}
-              >
-                <Text style={styles.replyText}>{reply}</Text>
-                <View style={styles.replyArrow}>
-                  <Ionicons name="arrow-forward" size={14} color={colors.surface} />
-                </View>
-              </Pressable>
-            ))}
-          </View>
-        ) : null}
       </View>
     </View>
   );
@@ -310,69 +339,175 @@ function ClarificationCard({
 function TaskGraphCard({ graph }: { graph?: TaskGraph }) {
   if (!graph) return null;
 
-  const completed = graph.tasks.filter(
-    (task) => task.status === 'completed' || task.status === 'skipped',
+  const journeyStepDefinitions: Array<{
+    id: string;
+    title: string;
+    description: string;
+    icon: IconName;
+    taskIds: string[];
+  }> = [
+    {
+      id: 'brief',
+      title: 'Trip details understood',
+      description: 'Route, dates, budget and preferences',
+      icon: 'sparkles',
+      taskIds: ['understand_request', 'resolve_constraints', 'resolve_locations'],
+    },
+    {
+      id: 'outbound',
+      title: 'Choose your flight there',
+      description: 'Live options for your departure day',
+      icon: 'airplane-outline',
+      taskIds: [
+        'outbound_flight_search',
+        'choose_outbound_flight',
+      ],
+    },
+    {
+      id: 'return',
+      title: 'Choose your flight back',
+      description: 'A separate search for the return day',
+      icon: 'return-down-back-outline',
+      taskIds: ['return_flight_search', 'choose_return_flight'],
+    },
+    {
+      id: 'stay',
+      title: 'Choose your stay',
+      description: 'Hotels that fit the trip and budget',
+      icon: 'bed-outline',
+      taskIds: ['hotel_search', 'choose_hotel'],
+    },
+    {
+      id: 'itinerary',
+      title: 'Build your day-by-day plan',
+      description: 'Validate the total and arrange the route',
+      icon: 'map-outline',
+      taskIds: ['place_search', 'compare_packages', 'create_itinerary'],
+    },
+    {
+      id: 'review',
+      title: 'Review your trip',
+      description: 'Nothing is saved without your approval',
+      icon: 'checkmark-circle-outline',
+      taskIds: ['request_approval'],
+    },
+    {
+      id: 'calendar',
+      title: 'Download calendar file',
+      description: 'Works with any calendar app',
+      icon: 'download-outline',
+      taskIds: ['add_calendar'],
+    },
+  ];
+  const journeySteps = journeyStepDefinitions.map((step) => {
+    const tasks = graph.tasks.filter((task) => step.taskIds.includes(task.id));
+    const status: TaskStatus = tasks.some((task) => task.status === 'failed')
+      ? 'failed'
+      : tasks.some((task) => task.status === 'awaiting_input')
+        ? 'awaiting_input'
+        : tasks.some((task) => task.status === 'awaiting_approval')
+          ? 'awaiting_approval'
+          : tasks.some((task) =>
+                ['running', 'retrying'].includes(task.status),
+              ) ||
+              (tasks.some((task) =>
+                ['completed', 'skipped'].includes(task.status),
+              ) &&
+                !tasks.every((task) =>
+                  ['completed', 'skipped'].includes(task.status),
+                ))
+            ? 'running'
+            : tasks.length > 0 &&
+                tasks.every((task) =>
+                  ['completed', 'skipped'].includes(task.status),
+                )
+              ? 'completed'
+              : 'waiting';
+    return { ...step, status };
+  });
+  const completed = journeySteps.filter(
+    (step) => step.status === 'completed',
   ).length;
-  const progress = graph.tasks.length ? completed / graph.tasks.length : 0;
-  const flight = graph.tasks.find((task) => task.id === 'flight_search');
-  const hotel = graph.tasks.find((task) => task.id === 'hotel_search');
-  const linear = graph.tasks.filter(
-    (task) => !['flight_search', 'hotel_search'].includes(task.id),
+  const progress = completed / journeySteps.length;
+  const needsReview = journeySteps.some(
+    (step) => step.status === 'awaiting_approval',
   );
-
-  const node = (task: (typeof graph.tasks)[number]) => (
-    <View key={task.id} style={styles.graphNode}>
-      <View
-        style={[
-          styles.statusDot,
-          {
-            borderColor: STATUS_COLORS[task.status],
-            backgroundColor:
-              task.status === 'completed' ? colors.green : colors.surface,
-          },
-        ]}
-      >
-        {task.status === 'completed' ? (
-          <Ionicons name="checkmark" size={11} color={colors.surface} />
-        ) : (
-          <View
-            style={[
-              styles.statusDotCore,
-              { backgroundColor: STATUS_COLORS[task.status] },
-            ]}
-          />
-        )}
-      </View>
-      <View style={styles.graphNodeCopy}>
-        <Text style={styles.graphNodeTitle}>{task.title}</Text>
-        <Text style={styles.graphNodeStatus}>
-          {task.status.replaceAll('_', ' ')}
-          {task.attempts > 1 ? ` · ${task.attempts} attempts` : ''}
-        </Text>
-      </View>
-    </View>
+  const needsChoice = journeySteps.some(
+    (step) => step.status === 'awaiting_input',
   );
+  const statusLabel: Record<TaskStatus, string> = {
+    completed: 'Ready',
+    running: 'Working on this',
+    retrying: 'Trying another option',
+    awaiting_input: 'Waiting for you',
+    awaiting_approval: 'Ready for you',
+    failed: 'Needs attention',
+    waiting: 'Up next',
+    skipped: 'Not needed',
+  };
 
   return (
     <View style={styles.card}>
       <CardHeader
-        icon="git-network"
-        eyebrow="Execution plan"
+        icon="sparkles"
+        eyebrow="Trip progress"
         title={graph.goal}
-        trailing={`${completed}/${graph.tasks.length}`}
+        trailing={
+          needsChoice
+            ? 'Your choice'
+            : needsReview
+              ? 'Your review'
+              : completed === journeySteps.length
+                ? 'Ready'
+                : 'Planning'
+        }
       />
       <View style={styles.progressTrack}>
         <View style={[styles.progressFill, { width: `${Math.round(progress * 100)}%` }]} />
       </View>
-      <View style={styles.graph}>
-        {linear.slice(0, 2).map(node)}
-        {flight || hotel ? (
-          <View style={styles.parallel}>
-            {flight ? <View style={styles.parallelNode}>{node(flight)}</View> : null}
-            {hotel ? <View style={styles.parallelNode}>{node(hotel)}</View> : null}
+      <View style={styles.journeyProgress}>
+        {journeySteps.map((step) => (
+          <View key={step.id} style={styles.journeyStep}>
+            <View
+              style={[
+                styles.journeyStepIcon,
+                step.status === 'completed' && styles.journeyStepIconComplete,
+                ['awaiting_input', 'awaiting_approval'].includes(step.status) &&
+                  styles.journeyStepIconReview,
+                step.status === 'failed' && styles.journeyStepIconFailed,
+              ]}
+            >
+              <Ionicons
+                name={step.status === 'completed' ? 'checkmark' : step.icon}
+                size={16}
+                color={
+                  step.status === 'completed'
+                    ? colors.surface
+                    : step.status === 'failed'
+                      ? colors.coral
+                      : colors.primary
+                }
+              />
+            </View>
+            <View style={styles.journeyStepCopy}>
+              <Text style={styles.journeyStepTitle}>{step.title}</Text>
+              <Text style={styles.journeyStepDescription}>
+                {step.description}
+              </Text>
+            </View>
+            <Text
+              style={[
+                styles.journeyStepStatus,
+                step.status === 'completed' && styles.journeyStepStatusComplete,
+                ['awaiting_input', 'awaiting_approval'].includes(step.status) &&
+                  styles.journeyStepStatusReview,
+                step.status === 'failed' && styles.journeyStepStatusFailed,
+              ]}
+            >
+              {statusLabel[step.status]}
+            </Text>
           </View>
-        ) : null}
-        {linear.slice(2).map(node)}
+        ))}
       </View>
     </View>
   );
@@ -430,6 +565,13 @@ function FlightCards({ flights }: { flights: FlightOption[] }) {
           const outbound = flight.outbound[0];
           const arrival = flight.outbound.at(-1);
           if (!outbound || !arrival) return null;
+          const durationMinutes = flight.outbound.reduce(
+            (total, segment) => total + segment.duration_minutes,
+            0,
+          );
+          const duration = `${Math.floor(durationMinutes / 60)}h ${
+            durationMinutes % 60
+          }m`;
           return (
             <View key={flight.id} style={styles.optionCard}>
               <View style={styles.optionTop}>
@@ -472,8 +614,8 @@ function FlightCards({ flights }: { flights: FlightOption[] }) {
                 </View>
                 <View style={styles.flightFactDivider} />
                 <View style={styles.flightFact}>
-                  <Text style={styles.flightFactValue}>{flight.provider}</Text>
-                  <Text style={styles.flightFactLabel}>Provider</Text>
+                  <Text style={styles.flightFactValue}>{duration}</Text>
+                  <Text style={styles.flightFactLabel}>Flight time</Text>
                 </View>
                 {flight.baggage ? (
                   <>
@@ -495,7 +637,170 @@ function FlightCards({ flights }: { flights: FlightOption[] }) {
   );
 }
 
-function HotelCards({ hotels }: { hotels: HotelOption[] }) {
+function FlightSelectionCards({
+  flights,
+  kind,
+  selectedId,
+  busy,
+  onSelect,
+}: {
+  flights: FlightLegOption[];
+  kind: SelectionKind;
+  selectedId?: string;
+  busy: boolean;
+  onSelect: (kind: SelectionKind, optionId: string) => void;
+}) {
+  if (!flights.length) return null;
+  const outbound = kind === 'outbound_flight';
+
+  return (
+    <View style={styles.collection}>
+      <View style={styles.sectionHeading}>
+        <View>
+          <Text style={styles.sectionEyebrow}>
+            {outbound ? 'Step 1 · flight there' : 'Step 2 · flight back'}
+          </Text>
+          <Text style={styles.sectionLabel}>
+            {outbound ? 'Choose your outbound' : 'Choose your return'}
+          </Text>
+        </View>
+        <Text style={styles.sectionCount}>{flights.length} choices</Text>
+      </View>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.carousel}
+      >
+        {flights.slice(0, 6).map((flight, index) => {
+          const first = flight.segments[0];
+          const last = flight.segments.at(-1);
+          if (!first || !last) return null;
+          const isSelected = selectedId === flight.id;
+          const durationMinutes = flight.segments.reduce(
+            (total, segment) => total + segment.duration_minutes,
+            0,
+          );
+          const duration = `${Math.floor(durationMinutes / 60)}h ${
+            durationMinutes % 60
+          }m`;
+          return (
+            <Pressable
+              key={flight.id}
+              onPress={() => onSelect(kind, flight.id)}
+              disabled={busy || isSelected}
+              accessibilityRole="radio"
+              accessibilityState={{ selected: isSelected, disabled: busy }}
+              accessibilityLabel={`Option ${index + 1}, ${first.airline}, ${formatCurrency(flight.total_price)}`}
+              style={({ pressed }) => [
+                styles.optionCard,
+                isSelected && styles.selectionCardSelected,
+                pressed && styles.pressed,
+              ]}
+            >
+              <View style={styles.optionTop}>
+                <View style={styles.airlineBadge}>
+                  <Ionicons name="airplane" size={16} color={colors.primary} />
+                </View>
+                <View style={styles.optionHeading}>
+                  <Text style={styles.optionRank}>Option {index + 1}</Text>
+                  <Text style={styles.optionAirline} numberOfLines={1}>
+                    {first.airline}
+                  </Text>
+                </View>
+                <View style={styles.legPriceWrap}>
+                  <Text style={styles.optionPrice}>
+                    {formatCurrency(flight.total_price)}
+                  </Text>
+                  <Text style={styles.legPriceLabel}>this leg</Text>
+                </View>
+              </View>
+              <View style={styles.routeRow}>
+                <View style={styles.routeEnd}>
+                  <Text style={styles.airport}>{first.departure_airport}</Text>
+                  <Text style={styles.mini}>{formatTime(first.departure_at)}</Text>
+                </View>
+                <View style={styles.routeLine}>
+                  <View style={styles.routeDot} />
+                  <View style={styles.routeStroke} />
+                  <Ionicons name="airplane" size={13} color={colors.primary} />
+                  <View style={styles.routeStroke} />
+                  <View style={styles.routeDot} />
+                </View>
+                <View style={[styles.routeEnd, styles.routeArrival]}>
+                  <Text style={styles.airport}>{last.arrival_airport}</Text>
+                  <Text style={styles.mini}>{formatTime(last.arrival_at)}</Text>
+                </View>
+              </View>
+              <View style={styles.flightFacts}>
+                <View style={styles.flightFact}>
+                  <Text style={styles.flightFactValue}>
+                    {flight.stops
+                      ? `${flight.stops} stop${flight.stops === 1 ? '' : 's'}`
+                      : 'Nonstop'}
+                  </Text>
+                  <Text style={styles.flightFactLabel}>Journey</Text>
+                </View>
+                <View style={styles.flightFactDivider} />
+                <View style={styles.flightFact}>
+                  <Text style={styles.flightFactValue}>{duration}</Text>
+                  <Text style={styles.flightFactLabel}>Flight time</Text>
+                </View>
+                <View style={styles.flightFactDivider} />
+                <View style={styles.flightFact}>
+                  <Text style={styles.flightFactValue} numberOfLines={1}>
+                    {first.flight_number || 'Live fare'}
+                  </Text>
+                  <Text style={styles.flightFactLabel}>Flight</Text>
+                </View>
+              </View>
+              <View
+                style={[
+                  styles.selectionAction,
+                  isSelected && styles.selectionActionSelected,
+                ]}
+              >
+                <Ionicons
+                  name={isSelected ? 'checkmark-circle' : 'add-circle-outline'}
+                  size={17}
+                  color={isSelected ? colors.surface : colors.primary}
+                />
+                <Text
+                  style={[
+                    styles.selectionActionText,
+                    isSelected && styles.selectionActionTextSelected,
+                  ]}
+                >
+                  {isSelected ? 'Selected' : `Choose option ${index + 1}`}
+                </Text>
+              </View>
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+      <Text style={styles.selectionHint}>
+        Prefer chat? Say “choose option 2” or name the airline.
+      </Text>
+    </View>
+  );
+}
+
+function HotelCards({
+  hotels,
+  destination,
+  visualTheme,
+  selectionKind,
+  selectedId,
+  busy = false,
+  onSelect,
+}: {
+  hotels: HotelOption[];
+  destination?: string;
+  visualTheme?: VisualTheme;
+  selectionKind?: SelectionKind;
+  selectedId?: string;
+  busy?: boolean;
+  onSelect?: (kind: SelectionKind, optionId: string) => void;
+}) {
   if (!hotels.length) return null;
 
   return (
@@ -513,11 +818,29 @@ function HotelCards({ hotels }: { hotels: HotelOption[] }) {
         contentContainerStyle={styles.carousel}
       >
         {hotels.slice(0, 5).map((hotel, index) => {
-          const fallback = tripImageForKey(
-            hotel.id || `${hotel.name}:${hotel.address}`,
-          );
+          const isSelected = selectedId === hotel.id;
+          const fallback = tripImageForTrip({
+            key: hotel.id || `${hotel.name}:${hotel.address}`,
+            destination,
+            visualTheme,
+          });
           return (
-            <View key={hotel.id} style={styles.hotelCard}>
+            <Pressable
+              key={hotel.id}
+              disabled={!selectionKind || !onSelect || busy || isSelected}
+              onPress={() => {
+                if (selectionKind && onSelect) onSelect(selectionKind, hotel.id);
+              }}
+              accessibilityRole={selectionKind ? 'radio' : undefined}
+              accessibilityState={
+                selectionKind ? { selected: isSelected, disabled: busy } : undefined
+              }
+              style={({ pressed }) => [
+                styles.hotelCard,
+                isSelected && styles.selectionCardSelected,
+                pressed && styles.pressed,
+              ]}
+            >
               <View style={styles.hotelImageFrame}>
                 <Image
                   source={hotel.image_url ? { uri: hotel.image_url } : fallback}
@@ -558,11 +881,49 @@ function HotelCards({ hotels }: { hotels: HotelOption[] }) {
                     </View>
                   ) : null}
                 </View>
+                {selectionKind ? (
+                  <View
+                    style={[
+                      styles.selectionAction,
+                      isSelected && styles.selectionActionSelected,
+                    ]}
+                  >
+                    <Ionicons
+                      name={isSelected ? 'checkmark-circle' : 'bed-outline'}
+                      size={17}
+                      color={isSelected ? colors.surface : colors.primary}
+                    />
+                    <Text
+                      style={[
+                        styles.selectionActionText,
+                        isSelected && styles.selectionActionTextSelected,
+                      ]}
+                    >
+                      {isSelected ? 'Selected' : `Choose stay ${index + 1}`}
+                    </Text>
+                  </View>
+                ) : null}
               </View>
-            </View>
+            </Pressable>
           );
         })}
       </ScrollView>
+      {selectionKind ? (
+        <Text style={styles.selectionHint}>
+          You can also say “pick the second stay” or type the hotel name.
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
+function SelectionConfirmation({ text }: { text: string }) {
+  return (
+    <View style={styles.selectionConfirmation}>
+      <View style={styles.selectionConfirmationIcon}>
+        <Ionicons name="checkmark" size={15} color={colors.surface} />
+      </View>
+      <Text style={styles.selectionConfirmationText}>{text}</Text>
     </View>
   );
 }
@@ -682,7 +1043,15 @@ function BudgetCard({
   );
 }
 
-function ItineraryCard({ itinerary }: { itinerary?: Itinerary }) {
+function ItineraryCard({
+  itinerary,
+  destination,
+  visualTheme,
+}: {
+  itinerary?: Itinerary;
+  destination?: string;
+  visualTheme?: VisualTheme;
+}) {
   const [activeDay, setActiveDay] = useState(0);
   if (!itinerary?.days.length) return null;
 
@@ -692,11 +1061,11 @@ function ItineraryCard({ itinerary }: { itinerary?: Itinerary }) {
   const lastDay = itinerary.days.at(-1);
   if (!selectedDay || !firstDay || !lastDay) return null;
 
-  const tripCopy = itinerary.days
-    .flatMap((day) => [day.title, ...day.items.flatMap((item) => [item.title, item.location || ''])])
-    .join(' ')
-    .toLowerCase();
-  const heroSource = tripImageForKey(tripCopy);
+  const heroSource = tripImageForTrip({
+    key: `${selectedDay.date}:${selectedDay.title}`,
+    destination,
+    visualTheme,
+  });
 
   return (
     <View style={[styles.card, styles.itineraryCard]}>
@@ -818,11 +1187,11 @@ function ApprovalCard({
     <View style={[styles.card, styles.approvalCard]}>
       <View style={styles.approvalTop}>
         <View style={styles.approvalIcon}>
-          <Ionicons name="calendar" size={22} color={colors.primary} />
+          <Ionicons name="document-attach" size={22} color={colors.primary} />
         </View>
         <View style={styles.approvalCopy}>
-          <Text style={styles.approvalEyebrow}>One tap from ready</Text>
-          <Text style={styles.approvalTitle}>Save this plan to your calendar</Text>
+          <Text style={styles.approvalEyebrow}>Take your plan anywhere</Text>
+          <Text style={styles.approvalTitle}>Download a calendar file</Text>
         </View>
       </View>
       <View style={styles.approvalStats}>
@@ -840,7 +1209,9 @@ function ApprovalCard({
       </View>
       <View style={styles.safetyRow}>
         <Ionicons name="lock-closed" size={14} color={colors.green} />
-        <Text style={styles.safetyText}>{approval.disclaimer}</Text>
+        <Text style={styles.safetyText}>
+          {approval.disclaimer} No calendar account access is needed.
+        </Text>
       </View>
       <View style={styles.approvalActions}>
         <Pressable
@@ -858,13 +1229,15 @@ function ApprovalCard({
           disabled={busy}
           style={({ pressed }) => [styles.approve, pressed && styles.pressed]}
         >
-          <Ionicons name="calendar-outline" size={16} color={colors.surface} />
-          <Text style={styles.approveText}>{busy ? 'Saving…' : 'Approve & save'}</Text>
+          <Ionicons name="download-outline" size={16} color={colors.surface} />
+          <Text style={styles.approveText}>
+            {busy ? 'Preparing…' : 'Download .ics'}
+          </Text>
         </Pressable>
       </View>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Cancel calendar approval"
+        accessibilityLabel="Skip calendar download"
         onPress={() => onDecision('cancel')}
         disabled={busy}
         style={({ pressed }) => [styles.cancel, pressed && styles.pressed]}
@@ -875,12 +1248,29 @@ function ApprovalCard({
   );
 }
 
-function CalendarResult({ text, links }: { text: string; links: string[] }) {
+function CalendarResult({
+  text,
+  busy,
+  onExport,
+  destination,
+  visualTheme,
+}: {
+  text: string;
+  busy: boolean;
+  onExport: () => void;
+  destination?: string;
+  visualTheme?: VisualTheme;
+}) {
+  const heroSource = tripImageForTrip({
+    key: 'calendar-export',
+    destination,
+    visualTheme,
+  });
   return (
     <View style={[styles.card, styles.calendarCard]}>
       <View style={styles.calendarHero}>
         <Image
-          source={genericDestination}
+          source={heroSource}
           style={StyleSheet.absoluteFill}
           contentFit="cover"
         />
@@ -895,15 +1285,32 @@ function CalendarResult({ text, links }: { text: string; links: string[] }) {
           <Text style={styles.cardTitle}>{text}</Text>
         </View>
         <View style={styles.successPill}>
-          <Ionicons name="calendar" size={14} color={colors.primary} />
-          <Text style={styles.successPillText}>{links.length}</Text>
+          <Ionicons name="document-outline" size={14} color={colors.primary} />
+          <Text style={styles.successPillText}>.ics</Text>
         </View>
       </View>
       <Text style={styles.body}>
-        {links.length
-          ? `${links.length} calendar link${links.length === 1 ? ' is' : 's are'} included in your trip report.`
-          : 'The itinerary remains saved in your trip history.'}
+        Open this portable file with whichever calendar app you already use.
       </Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Download itinerary calendar file"
+        disabled={busy}
+        onPress={onExport}
+        style={({ pressed }) => [
+          styles.calendarDownload,
+          pressed && styles.pressed,
+        ]}
+      >
+        {busy ? (
+          <Text style={styles.approveText}>Preparing…</Text>
+        ) : (
+          <>
+            <Ionicons name="download-outline" size={17} color={colors.surface} />
+            <Text style={styles.approveText}>Download again</Text>
+          </>
+        )}
+      </Pressable>
     </View>
   );
 }
@@ -911,35 +1318,37 @@ function CalendarResult({ text, links }: { text: string; links: string[] }) {
 function ReportCard({ report }: { report?: Record<string, unknown> }) {
   if (!report) return null;
 
+  const selected = report.selected_package as PackageOption | undefined;
+  const itinerary = report.itinerary as Itinerary | undefined;
   const metrics = [
     {
-      icon: 'checkmark-done-outline' as const,
-      label: 'Tasks',
-      value: String((report.task_graph as TaskGraph | undefined)?.estimated_steps ?? 0),
-    },
-    {
-      icon: 'extension-puzzle-outline' as const,
-      label: 'Tools',
-      value: String(Number(report.tools_called || 0)),
-    },
-    {
-      icon: 'refresh-outline' as const,
-      label: 'Retries',
-      value: String(Number(report.retries || 0)),
-    },
-    {
       icon: 'wallet-outline' as const,
+      label: 'Trip total',
+      value: formatCurrency(selected?.total_price || 0),
+    },
+    {
+      icon: 'calendar-clear-outline' as const,
+      label: 'Days',
+      value: String(itinerary?.days.length || 0),
+    },
+    {
+      icon: 'pricetag-outline' as const,
       label: 'Savings',
       value: formatCurrency(Number(report.estimated_savings || 0)),
+    },
+    {
+      icon: 'calendar-outline' as const,
+      label: 'Calendar',
+      value: 'ICS ready',
     },
   ];
 
   return (
     <View style={styles.card}>
       <CardHeader
-        icon="document-text-outline"
-        eyebrow="Execution report"
-        title="Everything accounted for"
+        icon="checkmark-circle-outline"
+        eyebrow="Trip summary"
+        title="Your plan is ready"
       />
       <View style={styles.metricGrid}>
         {metrics.map((metric) => (
@@ -957,7 +1366,8 @@ function ReportCard({ report }: { report?: Record<string, unknown> }) {
       <View style={styles.reportNotice}>
         <Ionicons name="shield-checkmark-outline" size={17} color={colors.green} />
         <Text style={styles.reportNoticeText}>
-          Safar recorded every constraint, provider call, comparison, approval, and calendar result.
+          Your choices and itinerary are saved here. No booking or payment was
+          made.
         </Text>
       </View>
     </View>
@@ -1159,37 +1569,6 @@ const styles = StyleSheet.create({
     color: colors.ink,
     flex: 1,
   },
-  replyStack: {
-    gap: 7,
-    marginTop: 4,
-  },
-  reply: {
-    minHeight: 47,
-    borderRadius: radius.medium,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.line,
-    paddingLeft: 13,
-    paddingRight: 9,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 9,
-    ...shadow,
-  },
-  replyText: {
-    ...type.label,
-    color: colors.ink,
-    flex: 1,
-  },
-  replyArrow: {
-    width: 28,
-    height: 28,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.primary,
-  },
   progressTrack: {
     height: 5,
     borderRadius: radius.pill,
@@ -1201,54 +1580,60 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
     backgroundColor: colors.primary,
   },
-  graph: {
-    gap: 3,
+  journeyProgress: {
+    gap: 4,
   },
-  graphNode: {
-    minHeight: 44,
+  journeyStep: {
+    minHeight: 58,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    paddingVertical: 4,
+    gap: 11,
+    paddingVertical: 5,
   },
-  graphNodeCopy: {
+  journeyStepIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    borderCurve: 'continuous',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.primarySoft,
+  },
+  journeyStepIconComplete: {
+    backgroundColor: colors.green,
+  },
+  journeyStepIconReview: {
+    backgroundColor: colors.infoSoft,
+  },
+  journeyStepIconFailed: {
+    backgroundColor: colors.coralSoft,
+  },
+  journeyStepCopy: {
     flex: 1,
+    minWidth: 0,
   },
-  graphNodeTitle: {
+  journeyStepTitle: {
     ...type.label,
     color: colors.ink,
   },
-  graphNodeStatus: {
+  journeyStepDescription: {
     ...type.caption,
     color: colors.muted,
-    textTransform: 'capitalize',
   },
-  statusDot: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    borderWidth: 2,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.green,
+  journeyStepStatus: {
+    ...type.caption,
+    color: colors.faint,
+    maxWidth: 72,
+    textAlign: 'right',
   },
-  statusDotCore: {
-    width: 7,
-    height: 7,
-    borderRadius: 4,
+  journeyStepStatusComplete: {
+    color: colors.green,
   },
-  parallel: {
-    flexDirection: 'row',
-    gap: 8,
-    marginVertical: 3,
+  journeyStepStatusReview: {
+    color: colors.info,
   },
-  parallelNode: {
-    flex: 1,
-    backgroundColor: colors.surfaceTint,
-    borderRadius: radius.medium,
-    paddingHorizontal: 9,
-    borderWidth: 1,
-    borderColor: colors.line,
+  journeyStepStatusFailed: {
+    color: colors.coral,
   },
   operation: {
     marginVertical: 3,
@@ -1312,6 +1697,7 @@ const styles = StyleSheet.create({
   optionCard: {
     width: 302,
     borderRadius: radius.large,
+    borderCurve: 'continuous',
     backgroundColor: colors.surface,
     padding: 15,
     borderWidth: 1,
@@ -1346,6 +1732,14 @@ const styles = StyleSheet.create({
   optionPrice: {
     ...type.section,
     color: colors.ink,
+  },
+  legPriceWrap: {
+    alignItems: 'flex-end',
+  },
+  legPriceLabel: {
+    ...type.caption,
+    color: colors.faint,
+    fontSize: 9,
   },
   routeRow: {
     flexDirection: 'row',
@@ -1414,6 +1808,7 @@ const styles = StyleSheet.create({
   hotelCard: {
     width: 260,
     borderRadius: radius.large,
+    borderCurve: 'continuous',
     overflow: 'hidden',
     backgroundColor: colors.surface,
     borderWidth: 1,
@@ -1499,6 +1894,63 @@ const styles = StyleSheet.create({
   distanceText: {
     ...type.caption,
     color: colors.primary,
+  },
+  selectionCardSelected: {
+    borderColor: colors.primary,
+    borderWidth: 2,
+  },
+  selectionAction: {
+    minHeight: 40,
+    borderRadius: radius.medium,
+    borderCurve: 'continuous',
+    backgroundColor: colors.primarySoft,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    marginTop: 2,
+    paddingHorizontal: 12,
+  },
+  selectionActionSelected: {
+    backgroundColor: colors.primary,
+  },
+  selectionActionText: {
+    ...type.label,
+    color: colors.primary,
+  },
+  selectionActionTextSelected: {
+    color: colors.surface,
+  },
+  selectionHint: {
+    ...type.caption,
+    color: colors.muted,
+    marginTop: 7,
+  },
+  selectionConfirmation: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 9,
+    borderRadius: radius.medium,
+    borderCurve: 'continuous',
+    backgroundColor: colors.greenSoft,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    marginVertical: 4,
+  },
+  selectionConfirmationIcon: {
+    width: 24,
+    height: 24,
+    borderRadius: 8,
+    borderCurve: 'continuous',
+    backgroundColor: colors.green,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  selectionConfirmationText: {
+    ...type.caption,
+    color: colors.ink,
+    flex: 1,
+    paddingTop: 2,
   },
   planCard: {
     backgroundColor: colors.surfaceTint,
@@ -1900,6 +2352,16 @@ const styles = StyleSheet.create({
     backgroundColor: colors.green,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  calendarDownload: {
+    minHeight: 48,
+    borderRadius: radius.medium,
+    borderCurve: 'continuous',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    backgroundColor: colors.primary,
   },
   successTitleRow: {
     flexDirection: 'row',

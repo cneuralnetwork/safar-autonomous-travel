@@ -28,6 +28,7 @@ export type TaskStatus =
   | 'completed'
   | 'retrying'
   | 'failed'
+  | 'awaiting_input'
   | 'awaiting_approval'
   | 'skipped';
 
@@ -39,6 +40,9 @@ export type MessageKind =
   | 'operation'
   | 'flight_options'
   | 'hotel_options'
+  | 'flight_selection'
+  | 'hotel_selection'
+  | 'selection_confirmation'
   | 'budget'
   | 'itinerary'
   | 'approval'
@@ -46,11 +50,19 @@ export type MessageKind =
   | 'report'
   | 'error';
 
+export type VisualTheme =
+  | 'coast'
+  | 'mountains'
+  | 'heritage'
+  | 'nature'
+  | 'city';
+
 export interface TravelConstraints {
   origin?: string;
   origin_airport?: string;
   destination?: string;
   destination_airport?: string;
+  visual_theme?: VisualTheme;
   start_date?: string;
   end_date?: string;
   duration_days?: number;
@@ -106,6 +118,23 @@ export interface FlightOption {
   currency: 'INR';
   stops: number;
   baggage?: string;
+}
+
+export type SelectionKind =
+  | 'outbound_flight'
+  | 'return_flight'
+  | 'hotel';
+
+export interface FlightLegOption {
+  id: string;
+  provider: string;
+  leg: 'outbound' | 'return';
+  segments: FlightSegment[];
+  total_price: number;
+  currency: 'INR';
+  stops: number;
+  baggage?: string;
+  booking_url?: string;
 }
 
 export interface HotelOption {
@@ -184,6 +213,7 @@ export interface Conversation {
   user_id: string;
   title: string;
   destination?: string;
+  visual_theme?: VisualTheme;
   last_message?: string;
   created_at: string;
   updated_at: string;
@@ -198,6 +228,12 @@ export interface RunState {
   harness_version: number;
   constraints: TravelConstraints;
   graph?: TaskGraph;
+  outbound_flights: FlightLegOption[];
+  return_flights: FlightLegOption[];
+  selected_outbound_id?: string;
+  selected_return_id?: string;
+  selected_hotel_id?: string;
+  selection_stage?: SelectionKind;
   flights: FlightOption[];
   hotels: HotelOption[];
   packages: PackageOption[];
