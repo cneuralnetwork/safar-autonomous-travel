@@ -1,5 +1,12 @@
 name: CI
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches: [main]
@@ -19,6 +26,7 @@ jobs:
       - run: uv sync --dev --locked
       - run: uv run ruff check .
       - run: uv run pytest
+      - run: docker build -t safar-api:ci .
 
   mobile:
     runs-on: ubuntu-latest
@@ -35,3 +43,4 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - run: npm run export:web

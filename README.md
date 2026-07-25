@@ -21,6 +21,8 @@ The repository contains:
 - The LLM interprets intent, while deterministic code enforces constraints.
 - Every task, retry, fallback, rejection, and external action is recorded.
 - Past trips and reusable preferences are persisted per Google account.
+- Interrupted planned/running workflows resume from persisted state after a
+  service restart; Calendar writes never resume without approval.
 - Real providers activate when configured. Deterministic demo providers keep
   local development and automated tests reliable.
 
@@ -86,6 +88,10 @@ uv run ruff check .
 cd ../mobile
 npm run typecheck
 npm test
+npm run export:web
+
+cd ../backend
+docker build -t safar-api:local .
 ```
 
 ## Deployment

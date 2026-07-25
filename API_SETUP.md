@@ -62,6 +62,8 @@ https://www.googleapis.com/auth/calendar.events.owned
 ```
 
 Restrict `GOOGLE_MAPS_API_KEY` to Places API (New) and the Render service.
+The same API verifies hotel distance when “near the beach” or another location
+constraint is treated as a hard requirement.
 
 ### 3. Sarvam AI
 
@@ -84,6 +86,8 @@ SERPAPI_API_KEY=...
 ```
 
 Safar calls SerpApi's `google_flights` and `google_hotels` engines.
+Round-trip searches use SerpApi's documented `departure_token` follow-up so
+the return legs are provider results rather than synthesized data.
 
 Fallback provider:
 
