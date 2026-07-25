@@ -164,12 +164,22 @@ create policy "preferences_update_own"
   with check ((select auth.uid()) = user_id);
 
 grant usage on schema public to authenticated;
+grant usage on schema public to service_role;
 grant select, insert, update, delete on public.profiles to authenticated;
 grant select, insert, update, delete on public.conversations to authenticated;
 grant select, insert on public.messages to authenticated;
 grant select on public.runs to authenticated;
 grant select, insert, update on public.approvals to authenticated;
 grant select, insert, update on public.user_preferences to authenticated;
+grant all privileges on table
+  public.profiles,
+  public.conversations,
+  public.messages,
+  public.runs,
+  public.approvals,
+  public.user_preferences,
+  public.oauth_tokens
+to service_role;
 revoke all on public.oauth_tokens from anon, authenticated;
 
 create or replace function public.handle_new_user()
@@ -208,4 +218,3 @@ alter publication supabase_realtime add table
   public.messages,
   public.runs,
   public.approvals;
-
