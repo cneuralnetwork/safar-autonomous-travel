@@ -366,7 +366,7 @@ class Orchestrator:
         calendar_task = self._task(run, "add_calendar")
         await self._start_task(run, calendar_task)
         run.calendar_event_links = await self.calendar.create_itinerary_events(
-            user.id, run.itinerary
+            user.id, str(run.id), run.itinerary
         )
         await self._complete_task(
             run,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -119,7 +120,9 @@ class CalendarService:
                 )
         await self.store.delete_calendar_connection(user_id)
 
-    async def create_itinerary_events(self, user_id: str, itinerary: Itinerary) -> list[str]:
+    async def create_itinerary_events(
+        self, user_id: str, run_id: str, itinerary: Itinerary
+    ) -> list[str]:
         encrypted = await self.store.get_calendar_connection(user_id)
         if not encrypted:
             raise PermissionError("Google Calendar is not connected")
@@ -130,8 +133,12 @@ class CalendarService:
             for item in day.items:
                 if item.category == "buffer":
                     continue
-                response = await self.client.post(
-                    "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                event_id = self._event_id(user_id, run_id, item.id)
+                response = await self.client.put(
+                    (
+                        "https://www.googleapis.com/calendar/v3/calendars/"
+                        f"primary/events/{event_id}"
+                    ),
                     headers={
                         "Authorization": f"Bearer {access_token}",
                         "Content-Type": "application/json",
@@ -149,13 +156,25 @@ class CalendarService:
                             "timeZone": itinerary.timezone,
                         },
                         "extendedProperties": {
-                            "private": {"createdBy": "Safar", "safarItemId": item.id}
+                            "private": {
+                                "createdBy": "Safar",
+                                "safarRunId": run_id,
+                                "safarItemId": item.id,
+                            }
                         },
                     },
                 )
                 response.raise_for_status()
                 links.append(response.json().get("htmlLink", ""))
         return [link for link in links if link]
+
+    @staticmethod
+    def _event_id(user_id: str, run_id: str, item_id: str) -> str:
+        # Google accepts base32hex characters for client-supplied event IDs.
+        # A stable ID makes a partially failed approved batch safe to retry.
+        return hashlib.sha256(
+            f"safar:{user_id}:{run_id}:{item_id}".encode()
+        ).hexdigest()[:40]
 
     async def _valid_access_token(self, user_id: str, tokens: dict[str, Any]) -> str:
         expires_at = datetime.fromisoformat(tokens["expires_at"])
