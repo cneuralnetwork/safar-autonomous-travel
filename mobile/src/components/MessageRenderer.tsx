@@ -14,6 +14,7 @@ import type {
   ChatMessage,
   FlightLegOption,
   FlightOption,
+  FlightSegment,
   HotelOption,
   Itinerary,
   ItineraryItem,
@@ -75,6 +76,36 @@ const CATEGORY_COLORS: Record<ItineraryItem['category'], string> = {
   meal: colors.amber,
   buffer: colors.faint,
 };
+
+const TRANSPORT_ICONS: Record<FlightSegment['mode'], IconName> = {
+  flight: 'airplane',
+  train: 'train',
+  bus: 'bus',
+  transfer: 'car',
+};
+
+function transportLabel(segments: FlightSegment[]) {
+  return Array.from(
+    new Set(segments.map((segment) => segment.mode)),
+  )
+    .map((mode) => mode.charAt(0).toUpperCase() + mode.slice(1))
+    .join(' + ');
+}
+
+function journeyDuration(segments: FlightSegment[]) {
+  const first = segments[0];
+  const last = segments.at(-1);
+  if (!first || !last) return '';
+  const elapsed = Math.max(
+    1,
+    Math.round(
+      (new Date(last.arrival_at).getTime() -
+        new Date(first.departure_at).getTime()) /
+        60_000,
+    ),
+  );
+  return `${Math.floor(elapsed / 60)}h ${elapsed % 60}m`;
+}
 
 export const MessageRenderer = memo(function MessageRenderer({
   message,
@@ -355,9 +386,9 @@ function TaskGraphCard({ graph }: { graph?: TaskGraph }) {
     },
     {
       id: 'outbound',
-      title: 'Choose your flight there',
-      description: 'Live options for your departure day',
-      icon: 'airplane-outline',
+      title: 'Choose your journey there',
+      description: 'Flight, railway or road options for departure',
+      icon: 'navigate-outline',
       taskIds: [
         'outbound_flight_search',
         'choose_outbound_flight',
@@ -365,8 +396,8 @@ function TaskGraphCard({ graph }: { graph?: TaskGraph }) {
     },
     {
       id: 'return',
-      title: 'Choose your flight back',
-      description: 'A separate search for the return day',
+      title: 'Choose your journey back',
+      description: 'A separate multimodal search for the return',
       icon: 'return-down-back-outline',
       taskIds: ['return_flight_search', 'choose_return_flight'],
     },
@@ -552,7 +583,7 @@ function FlightCards({ flights }: { flights: FlightOption[] }) {
       <View style={styles.sectionHeading}>
         <View>
           <Text style={styles.sectionEyebrow}>Compared live options</Text>
-          <Text style={styles.sectionLabel}>Flights</Text>
+          <Text style={styles.sectionLabel}>Journeys</Text>
         </View>
         <Text style={styles.sectionCount}>{flights.length} found</Text>
       </View>
@@ -565,25 +596,28 @@ function FlightCards({ flights }: { flights: FlightOption[] }) {
           const outbound = flight.outbound[0];
           const arrival = flight.outbound.at(-1);
           if (!outbound || !arrival) return null;
-          const durationMinutes = flight.outbound.reduce(
-            (total, segment) => total + segment.duration_minutes,
-            0,
-          );
-          const duration = `${Math.floor(durationMinutes / 60)}h ${
-            durationMinutes % 60
-          }m`;
+          const duration = journeyDuration(flight.outbound);
+          const modes = transportLabel(flight.outbound);
           return (
             <View key={flight.id} style={styles.optionCard}>
               <View style={styles.optionTop}>
                 <View style={styles.airlineBadge}>
-                  <Ionicons name="airplane" size={16} color={colors.primary} />
+                  <Ionicons
+                    name={
+                      flight.route_type !== 'direct'
+                        ? 'git-branch'
+                        : TRANSPORT_ICONS[outbound.mode || 'flight']
+                    }
+                    size={16}
+                    color={colors.primary}
+                  />
                 </View>
                 <View style={styles.optionHeading}>
                   <Text style={styles.optionRank}>
                     {index === 0 ? 'Best match' : `Option ${index + 1}`}
                   </Text>
                   <Text style={styles.optionAirline} numberOfLines={1}>
-                    {outbound.airline}
+                    {modes}
                   </Text>
                 </View>
                 <Text style={styles.optionPrice}>{formatCurrency(flight.total_price)}</Text>
@@ -596,7 +630,11 @@ function FlightCards({ flights }: { flights: FlightOption[] }) {
                 <View style={styles.routeLine}>
                   <View style={styles.routeDot} />
                   <View style={styles.routeStroke} />
-                  <Ionicons name="airplane" size={13} color={colors.primary} />
+                  <Ionicons
+                    name={TRANSPORT_ICONS[outbound.mode || 'flight']}
+                    size={13}
+                    color={colors.primary}
+                  />
                   <View style={styles.routeStroke} />
                   <View style={styles.routeDot} />
                 </View>
@@ -608,14 +646,16 @@ function FlightCards({ flights }: { flights: FlightOption[] }) {
               <View style={styles.flightFacts}>
                 <View style={styles.flightFact}>
                   <Text style={styles.flightFactValue}>
-                    {flight.stops ? `${flight.stops} stop${flight.stops === 1 ? '' : 's'}` : 'Nonstop'}
+                    {flight.stops
+                      ? `${flight.stops} transfer${flight.stops === 1 ? '' : 's'}`
+                      : 'Direct'}
                   </Text>
                   <Text style={styles.flightFactLabel}>Journey</Text>
                 </View>
                 <View style={styles.flightFactDivider} />
                 <View style={styles.flightFact}>
                   <Text style={styles.flightFactValue}>{duration}</Text>
-                  <Text style={styles.flightFactLabel}>Flight time</Text>
+                  <Text style={styles.flightFactLabel}>Total time</Text>
                 </View>
                 {flight.baggage ? (
                   <>
@@ -658,10 +698,10 @@ function FlightSelectionCards({
       <View style={styles.sectionHeading}>
         <View>
           <Text style={styles.sectionEyebrow}>
-            {outbound ? 'Step 1 · flight there' : 'Step 2 · flight back'}
+            {outbound ? 'Step 1 · journey there' : 'Step 2 · journey back'}
           </Text>
           <Text style={styles.sectionLabel}>
-            {outbound ? 'Choose your outbound' : 'Choose your return'}
+            {outbound ? 'Choose your outbound route' : 'Choose your return route'}
           </Text>
         </View>
         <Text style={styles.sectionCount}>{flights.length} choices</Text>
@@ -676,13 +716,9 @@ function FlightSelectionCards({
           const last = flight.segments.at(-1);
           if (!first || !last) return null;
           const isSelected = selectedId === flight.id;
-          const durationMinutes = flight.segments.reduce(
-            (total, segment) => total + segment.duration_minutes,
-            0,
-          );
-          const duration = `${Math.floor(durationMinutes / 60)}h ${
-            durationMinutes % 60
-          }m`;
+          const duration = journeyDuration(flight.segments);
+          const modes = transportLabel(flight.segments);
+          const primaryMode = first.mode || 'flight';
           return (
             <Pressable
               key={flight.id}
@@ -690,7 +726,7 @@ function FlightSelectionCards({
               disabled={busy || isSelected}
               accessibilityRole="radio"
               accessibilityState={{ selected: isSelected, disabled: busy }}
-              accessibilityLabel={`Option ${index + 1}, ${first.airline}, ${formatCurrency(flight.total_price)}`}
+              accessibilityLabel={`Option ${index + 1}, ${modes}, ${formatCurrency(flight.total_price)}${flight.fare_is_estimate ? ' estimated' : ''}`}
               style={({ pressed }) => [
                 styles.optionCard,
                 isSelected && styles.selectionCardSelected,
@@ -699,12 +735,20 @@ function FlightSelectionCards({
             >
               <View style={styles.optionTop}>
                 <View style={styles.airlineBadge}>
-                  <Ionicons name="airplane" size={16} color={colors.primary} />
+                  <Ionicons
+                    name={
+                      flight.route_type !== 'direct'
+                        ? 'git-branch'
+                        : TRANSPORT_ICONS[primaryMode]
+                    }
+                    size={16}
+                    color={colors.primary}
+                  />
                 </View>
                 <View style={styles.optionHeading}>
                   <Text style={styles.optionRank}>Option {index + 1}</Text>
                   <Text style={styles.optionAirline} numberOfLines={1}>
-                    {first.airline}
+                    {modes}
                   </Text>
                 </View>
                 <View style={styles.legPriceWrap}>
@@ -712,6 +756,9 @@ function FlightSelectionCards({
                     {formatCurrency(flight.total_price)}
                   </Text>
                   <Text style={styles.legPriceLabel}>this leg</Text>
+                  {flight.fare_is_estimate ? (
+                    <Text style={styles.estimateLabel}>estimated</Text>
+                  ) : null}
                 </View>
               </View>
               <View style={styles.routeRow}>
@@ -722,7 +769,18 @@ function FlightSelectionCards({
                 <View style={styles.routeLine}>
                   <View style={styles.routeDot} />
                   <View style={styles.routeStroke} />
-                  <Ionicons name="airplane" size={13} color={colors.primary} />
+                  <View style={styles.modeIcons}>
+                    {Array.from(
+                      new Set(flight.segments.map((segment) => segment.mode || 'flight')),
+                    ).map((mode) => (
+                      <Ionicons
+                        key={mode}
+                        name={TRANSPORT_ICONS[mode]}
+                        size={13}
+                        color={colors.primary}
+                      />
+                    ))}
+                  </View>
                   <View style={styles.routeStroke} />
                   <View style={styles.routeDot} />
                 </View>
@@ -735,24 +793,40 @@ function FlightSelectionCards({
                 <View style={styles.flightFact}>
                   <Text style={styles.flightFactValue}>
                     {flight.stops
-                      ? `${flight.stops} stop${flight.stops === 1 ? '' : 's'}`
-                      : 'Nonstop'}
+                      ? `${flight.stops} transfer${flight.stops === 1 ? '' : 's'}`
+                      : 'Direct'}
                   </Text>
                   <Text style={styles.flightFactLabel}>Journey</Text>
                 </View>
                 <View style={styles.flightFactDivider} />
                 <View style={styles.flightFact}>
                   <Text style={styles.flightFactValue}>{duration}</Text>
-                  <Text style={styles.flightFactLabel}>Flight time</Text>
+                  <Text style={styles.flightFactLabel}>Total time</Text>
                 </View>
                 <View style={styles.flightFactDivider} />
                 <View style={styles.flightFact}>
                   <Text style={styles.flightFactValue} numberOfLines={1}>
-                    {first.flight_number || 'Live fare'}
+                    {first.flight_number || modes}
                   </Text>
-                  <Text style={styles.flightFactLabel}>Flight</Text>
+                  <Text style={styles.flightFactLabel}>Service</Text>
                 </View>
               </View>
+              {flight.source_note ? (
+                <View style={styles.sourceNotice}>
+                  <Ionicons
+                    name={
+                      flight.fare_is_estimate
+                        ? 'information-circle-outline'
+                        : 'shield-checkmark-outline'
+                    }
+                    size={14}
+                    color={flight.fare_is_estimate ? colors.amber : colors.green}
+                  />
+                  <Text style={styles.sourceNoticeText} numberOfLines={3}>
+                    {flight.source_note}
+                  </Text>
+                </View>
+              ) : null}
               <View
                 style={[
                   styles.selectionAction,
@@ -778,7 +852,7 @@ function FlightSelectionCards({
         })}
       </ScrollView>
       <Text style={styles.selectionHint}>
-        Prefer chat? Say “choose option 2” or name the airline.
+        Prefer chat? Say “choose option 2”, “take the train”, or name the service.
       </Text>
     </View>
   );
@@ -943,8 +1017,11 @@ function BudgetCard({
     value: string;
   }> = [
     {
-      icon: 'airplane-outline',
-      label: 'Flights',
+      icon:
+        selected.flight.route_type !== 'direct'
+          ? 'git-branch-outline'
+          : TRANSPORT_ICONS[selected.flight.outbound[0]?.mode || 'flight'],
+      label: 'Transport',
       value: formatCurrency(selected.flight.total_price),
     },
     {
@@ -986,7 +1063,7 @@ function BudgetCard({
   ];
 
   return (
-    <View style={[styles.card, styles.planCard]}>
+      <View style={[styles.card, styles.planCard]}>
       <CardHeader
         icon="sparkles"
         eyebrow="Best plan found"
@@ -1002,6 +1079,19 @@ function BudgetCard({
           <Ionicons name="shield-checkmark" size={21} color={colors.primary} />
         </View>
       </View>
+      {selected.flight.fare_is_estimate ? (
+        <View style={styles.sourceNotice}>
+          <Ionicons
+            name="information-circle-outline"
+            size={14}
+            color={colors.amber}
+          />
+          <Text style={styles.sourceNoticeText}>
+            The railway or road fare is an estimate. Verify ticket price and
+            availability with the operator before booking.
+          </Text>
+        </View>
+      ) : null}
       <View style={styles.statGrid}>
         {stats.map((stat) => (
           <View key={stat.label} style={styles.statCard}>
@@ -1741,6 +1831,13 @@ const styles = StyleSheet.create({
     color: colors.faint,
     fontSize: 9,
   },
+  estimateLabel: {
+    ...type.caption,
+    color: colors.amber,
+    fontSize: 8,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
   routeRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1764,6 +1861,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 7,
+  },
+  modeIcons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
   },
   routeDot: {
     width: 5,
@@ -1804,6 +1906,22 @@ const styles = StyleSheet.create({
     width: 1,
     height: 25,
     backgroundColor: colors.line,
+  },
+  sourceNotice: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 7,
+    borderRadius: radius.medium,
+    backgroundColor: colors.amberSoft,
+    paddingHorizontal: 9,
+    paddingVertical: 8,
+  },
+  sourceNoticeText: {
+    ...type.caption,
+    color: colors.muted,
+    flex: 1,
+    fontSize: 9,
+    lineHeight: 13,
   },
   hotelCard: {
     width: 260,

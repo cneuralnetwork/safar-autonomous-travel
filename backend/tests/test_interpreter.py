@@ -95,9 +95,9 @@ async def test_sarvam_fields_merge_with_validated_next_weekend_dates() -> None:
                     budget=40_000,
                     adults=1,
                 ),
-                explicit_fields=["origin", "destination", "budget"],
-                inferred_fields=["adults"],
-                assumptions=["Assumed 1 adult traveller"],
+                explicit_fields=["origin", "destination", "budget", "adults"],
+                inferred_fields=[],
+                assumptions=[],
                 assistant_message=(
                     "I’ll plan Chennai to Jaipur next weekend within ₹40,000."
                 ),
@@ -114,7 +114,7 @@ async def test_sarvam_fields_merge_with_validated_next_weekend_dates() -> None:
     )
 
     outcome = await interpreter.interpret_turn(
-        "I wanna go to Jaipur from Chennai, Budget 40000, next weekend",
+        "I wanna go to Jaipur from Chennai for one adult, Budget 40000, next weekend",
         today=date(2026, 7, 25),
     )
 
@@ -211,7 +211,11 @@ async def test_sarvam_failure_falls_back_to_deterministic_interpretation() -> No
     assert outcome.constraints.origin == "Guwahati"
     assert outcome.constraints.destination == "Goa"
     assert outcome.constraints.visual_theme == "coast"
-    assert outcome.constraints.missing_fields == ["start_date", "end_date"]
+    assert outcome.constraints.missing_fields == [
+        "start_date",
+        "end_date",
+        "adults",
+    ]
     assert outcome.model_metrics == failed_metrics
     assert outcome.quick_replies
     await interpreter.gateway.close()
@@ -220,9 +224,70 @@ async def test_sarvam_failure_falls_back_to_deterministic_interpretation() -> No
 async def test_budget_is_optional_when_route_and_dates_are_known() -> None:
     interpreter = RequestInterpreter(Settings(sarvam_api_key=None))
     constraints = await interpreter.interpret(
-        "plan a trip from Kolkata to Goa next weekend",
+        "plan a trip from Kolkata to Goa next weekend for one person",
         today=date(2026, 7, 25),
     )
 
     assert constraints.budget is None
     assert constraints.missing_fields == []
+
+
+async def test_model_cannot_infer_an_unstated_traveller_count() -> None:
+    interpreter = RequestInterpreter(Settings(sarvam_api_key="test-key"))
+    interpreter.agent.interpret = AsyncMock(
+        return_value=StructuredModelResult(
+            value=TurnInterpretation(
+                intent="plan_trip",
+                constraints=TravelConstraintPatch(
+                    origin="Kolkata",
+                    destination="Goa",
+                    adults=1,
+                ),
+                explicit_fields=["origin", "destination"],
+                inferred_fields=["adults"],
+                assumptions=["Assumed 1 adult traveller"],
+                assistant_message="I understood the route and dates.",
+            ),
+            metrics=ModelMetrics(
+                phase="interpretation",
+                model="sarvam-105b",
+                prompt_version="travel-turn-v3",
+                status="completed",
+                attempts=1,
+                latency_ms=100,
+            ),
+        )
+    )
+
+    outcome = await interpreter.interpret_turn(
+        "Plan a trip from Kolkata to Goa next weekend",
+        today=date(2026, 7, 25),
+    )
+
+    assert outcome.constraints.adults is None
+    assert outcome.constraints.missing_fields == ["adults"]
+    assert not any(
+        "adult" in assumption.lower() or "traveller" in assumption.lower()
+        for assumption in outcome.assumptions
+    )
+    await interpreter.gateway.close()
+
+
+async def test_short_reply_answers_the_traveller_clarification() -> None:
+    interpreter = RequestInterpreter(Settings(sarvam_api_key=None))
+    current = await interpreter.interpret(
+        "Plan a trip from Kolkata to Goa next weekend",
+        today=date(2026, 7, 25),
+    )
+
+    assert current.adults is None
+    assert current.missing_fields == ["adults"]
+
+    resolved = await interpreter.interpret(
+        "2",
+        current=current,
+        today=date(2026, 7, 25),
+    )
+
+    assert resolved.adults == 2
+    assert resolved.missing_fields == []

@@ -60,13 +60,15 @@ export type VisualTheme =
 export interface TravelConstraints {
   origin?: string;
   origin_airport?: string;
+  origin_station_codes: string[];
   destination?: string;
   destination_airport?: string;
+  destination_station_codes: string[];
   visual_theme?: VisualTheme;
   start_date?: string;
   end_date?: string;
   duration_days?: number;
-  adults: number;
+  adults?: number | null;
   children: number;
   budget?: number;
   currency: 'INR';
@@ -107,6 +109,15 @@ export interface FlightSegment {
   departure_at: string;
   arrival_at: string;
   duration_minutes: number;
+  mode: 'flight' | 'train' | 'bus' | 'transfer';
+  service_name?: string;
+  departure_name?: string;
+  arrival_name?: string;
+  data_quality: 'live' | 'scheduled' | 'estimated';
+  data_source?: string;
+  distance_km?: number;
+  delay_minutes?: number;
+  platform?: string;
 }
 
 export interface FlightOption {
@@ -118,6 +129,11 @@ export interface FlightOption {
   currency: 'INR';
   stops: number;
   baggage?: string;
+  route_type: 'direct' | 'connected' | 'multimodal';
+  fare_is_estimate: boolean;
+  schedule_is_live: boolean;
+  source_note?: string;
+  intermediate_stops: number;
 }
 
 export type SelectionKind =
@@ -135,6 +151,11 @@ export interface FlightLegOption {
   stops: number;
   baggage?: string;
   booking_url?: string;
+  route_type: 'direct' | 'connected' | 'multimodal';
+  fare_is_estimate: boolean;
+  schedule_is_live: boolean;
+  source_note?: string;
+  intermediate_stops: number;
 }
 
 export interface HotelOption {
@@ -247,6 +268,7 @@ export interface RunState {
   model_calls: number;
   replans: number;
   assumptions: string[];
+  station_resolution_attempted: boolean;
   last_event_id?: number;
   resilience_demo: boolean;
 }

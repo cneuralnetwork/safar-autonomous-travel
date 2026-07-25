@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, time, timedelta
 
 from app.models import (
+    FlightSegment,
     Itinerary,
     ItineraryDay,
     ItineraryItem,
@@ -10,6 +11,40 @@ from app.models import (
     PlaceOption,
     TravelConstraints,
 )
+
+
+def _journey_title(segments: list[FlightSegment]) -> str:
+    modes = " + ".join(
+        dict.fromkeys(segment.mode.title() for segment in segments)
+    )
+    return (
+        f"{modes} · {segments[0].departure_airport} → "
+        f"{segments[-1].arrival_airport}"
+    )
+
+
+def _journey_description(segments: list[FlightSegment], *, returning: bool = False) -> str:
+    services = " → ".join(
+        dict.fromkeys(
+            segment.service_name
+            or (
+                f"{segment.airline} {segment.flight_number}".strip()
+                if segment.flight_number
+                else segment.airline
+            )
+            for segment in segments
+        )
+    )
+    suffix = "Return journey." if returning else "Keep the shown transfer buffers."
+    return f"{services}. {suffix}"
+
+
+def _departure_buffer(segment: FlightSegment) -> timedelta:
+    if segment.mode == "flight":
+        return timedelta(hours=2)
+    if segment.mode == "train":
+        return timedelta(minutes=45)
+    return timedelta(minutes=30)
 
 
 def _closest_route(places: list[PlaceOption]) -> list[PlaceOption]:
@@ -53,21 +88,23 @@ def create_itinerary(
             outbound = selected.flight.outbound
             items.append(
                 ItineraryItem(
-                    title=(f"Fly {outbound[0].departure_airport} → {outbound[-1].arrival_airport}"),
-                    description=(
-                        f"{outbound[0].airline}. Arrive early enough for security and boarding."
-                    ),
+                    title=_journey_title(outbound),
+                    description=_journey_description(outbound),
                     start_at=outbound[0].departure_at,
                     end_at=outbound[-1].arrival_at,
                     location=outbound[0].departure_airport,
-                    category="flight",
+                    category=(
+                        "flight"
+                        if any(segment.mode == "flight" for segment in outbound)
+                        else "transfer"
+                    ),
                 )
             )
             transfer_start = outbound[-1].arrival_at + timedelta(minutes=20)
             items.append(
                 ItineraryItem(
-                    title="Airport to hotel",
-                    description="Reserved transfer and check-in buffer.",
+                    title="Arrival point to hotel",
+                    description="Local transfer and check-in buffer.",
                     start_at=transfer_start,
                     end_at=transfer_start + timedelta(minutes=75),
                     location=selected.hotel.address,
@@ -106,7 +143,11 @@ def create_itinerary(
             tzinfo=selected.flight.outbound[0].departure_at.tzinfo,
         )
         if last_day and selected.flight.inbound:
-            latest_end = selected.flight.inbound[0].departure_at - timedelta(hours=3)
+            latest_end = (
+                selected.flight.inbound[0].departure_at
+                - _departure_buffer(selected.flight.inbound[0])
+                - timedelta(hours=1)
+            )
         else:
             latest_end = datetime.combine(
                 trip_date,
@@ -157,11 +198,11 @@ def create_itinerary(
 
         if last_day and selected.flight.inbound:
             inbound = selected.flight.inbound
-            transfer_end = inbound[0].departure_at - timedelta(hours=2)
+            transfer_end = inbound[0].departure_at - _departure_buffer(inbound[0])
             items.append(
                 ItineraryItem(
-                    title="Hotel to airport",
-                    description="Transfer plus airport arrival buffer.",
+                    title="Hotel to departure point",
+                    description="Local transfer plus the correct boarding buffer.",
                     start_at=transfer_end - timedelta(minutes=75),
                     end_at=transfer_end,
                     location=inbound[0].departure_airport,
@@ -170,12 +211,16 @@ def create_itinerary(
             )
             items.append(
                 ItineraryItem(
-                    title=(f"Fly {inbound[0].departure_airport} → {inbound[-1].arrival_airport}"),
-                    description=f"{inbound[0].airline}. Return journey.",
+                    title=_journey_title(inbound),
+                    description=_journey_description(inbound, returning=True),
                     start_at=inbound[0].departure_at,
                     end_at=inbound[-1].arrival_at,
                     location=inbound[0].departure_airport,
-                    category="flight",
+                    category=(
+                        "flight"
+                        if any(segment.mode == "flight" for segment in inbound)
+                        else "transfer"
+                    ),
                 )
             )
         items.sort(key=lambda item: item.start_at)

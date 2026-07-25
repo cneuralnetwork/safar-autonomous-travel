@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 VisualTheme = Literal["coast", "mountains", "heritage", "nature", "city"]
 SelectionKind = Literal["outbound_flight", "return_flight", "hotel"]
+TransportMode = Literal["flight", "train", "bus", "transfer"]
+TransportDataQuality = Literal["live", "scheduled", "estimated"]
 
 
 def utc_now() -> datetime:
@@ -93,13 +95,15 @@ class TravelConstraints(BaseModel):
     task_type: Literal["travel_planning"] = "travel_planning"
     origin: str | None = None
     origin_airport: str | None = None
+    origin_station_codes: list[str] = Field(default_factory=list)
     destination: str | None = None
     destination_airport: str | None = None
+    destination_station_codes: list[str] = Field(default_factory=list)
     visual_theme: VisualTheme | None = None
     start_date: date | None = None
     end_date: date | None = None
     duration_days: int | None = Field(default=None, ge=1, le=30)
-    adults: int = Field(default=1, ge=1, le=9)
+    adults: int | None = Field(default=None, ge=1, le=9)
     children: int = Field(default=0, ge=0, le=8)
     budget: int | None = Field(default=None, ge=1000)
     currency: Literal["INR"] = "INR"
@@ -125,6 +129,7 @@ class TravelConstraints(BaseModel):
             "destination": self.destination,
             "start_date": self.start_date,
             "end_date": self.end_date,
+            "adults": self.adults,
         }
         return [key for key, value in required.items() if value is None]
 
@@ -176,6 +181,15 @@ class FlightSegment(BaseModel):
     departure_at: datetime
     arrival_at: datetime
     duration_minutes: int
+    mode: TransportMode = "flight"
+    service_name: str | None = None
+    departure_name: str | None = None
+    arrival_name: str | None = None
+    data_quality: TransportDataQuality = "live"
+    data_source: str | None = None
+    distance_km: float | None = None
+    delay_minutes: int | None = None
+    platform: str | None = None
 
 
 class FlightOption(BaseModel):
@@ -189,10 +203,23 @@ class FlightOption(BaseModel):
     baggage: str | None = None
     booking_url: str | None = None
     score: float = 0
+    route_type: Literal["direct", "connected", "multimodal"] = "direct"
+    fare_is_estimate: bool = False
+    schedule_is_live: bool = True
+    source_note: str | None = None
+    intermediate_stops: int = 0
 
     @property
     def departure_at(self) -> datetime:
         return self.outbound[0].departure_at
+
+    @property
+    def modes(self) -> list[TransportMode]:
+        return list(
+            dict.fromkeys(
+                segment.mode for segment in [*self.outbound, *self.inbound]
+            )
+        )
 
 
 class FlightLegOption(BaseModel):
@@ -206,10 +233,19 @@ class FlightLegOption(BaseModel):
     baggage: str | None = None
     booking_url: str | None = None
     score: float = 0
+    route_type: Literal["direct", "connected", "multimodal"] = "direct"
+    fare_is_estimate: bool = False
+    schedule_is_live: bool = True
+    source_note: str | None = None
+    intermediate_stops: int = 0
 
     @property
     def departure_at(self) -> datetime:
         return self.segments[0].departure_at
+
+    @property
+    def modes(self) -> list[TransportMode]:
+        return list(dict.fromkeys(segment.mode for segment in self.segments))
 
 
 class HotelOption(BaseModel):
@@ -346,6 +382,9 @@ class RunState(BaseModel):
     model_calls: int = 0
     replans: int = 0
     assumptions: list[str] = Field(default_factory=list)
+    preference_confirmation_pending: bool = False
+    saved_preferences_applied: bool = False
+    station_resolution_attempted: bool = False
     last_event_id: int | None = None
     resilience_demo: bool = False
     started_at: datetime = Field(default_factory=utc_now)

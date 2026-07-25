@@ -27,6 +27,7 @@ export const colors = {
   info: '#5E8EDB',
   infoSoft: '#ECF4FD',
   amber: '#F4B43C',
+  amberSoft: '#FFF8E7',
   whiteMuted: '#C7C9DF',
 };
 

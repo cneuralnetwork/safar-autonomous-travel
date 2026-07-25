@@ -203,21 +203,58 @@ class Orchestrator:
                     TripSelectionRequest(kind=kind, option_id=option_id),
                 )
 
-        base_constraints = base_constraints_override or (
-            current_run.constraints
-            if current_run
-            and current_run.status in {RunStatus.awaiting_input, RunStatus.awaiting_approval}
-            else None
-        )
         memory_applied = False
         saved_preferences = await self.store.get_user_preferences(user.id)
-        if (
-            base_constraints is None
-            and "usual preference" in request.text.lower()
-            and saved_preferences
-        ):
-            base_constraints = self._constraints_from_preferences(saved_preferences)
-            memory_applied = True
+        preference_confirmation_requested = False
+        if current_run and current_run.preference_confirmation_pending:
+            preference_decision = self._preference_confirmation_decision(request.text)
+            if preference_decision is None:
+                await self._message(
+                    current_run,
+                    MessageKind.clarification,
+                    self._saved_preferences_confirmation(saved_preferences),
+                    {"quick_replies": [], "confirmation": "saved_preferences"},
+                )
+                return current_run
+            current_run.preference_confirmation_pending = False
+            current_run.saved_preferences_applied = bool(
+                preference_decision and saved_preferences
+            )
+            if preference_decision and saved_preferences:
+                base_constraints = self._apply_confirmed_preferences(
+                    current_run.constraints,
+                    saved_preferences,
+                )
+                memory_applied = True
+                current_run.assumptions = list(
+                    dict.fromkeys(
+                        [
+                            *current_run.assumptions,
+                            "Applied saved preferences after user confirmation",
+                        ]
+                    )
+                )
+            else:
+                base_constraints = current_run.constraints
+            await self.store.save_run(current_run)
+        else:
+            base_constraints = base_constraints_override or (
+                current_run.constraints
+                if current_run
+                and current_run.status
+                in {RunStatus.awaiting_input, RunStatus.awaiting_approval}
+                else None
+            )
+            preference_confirmation_requested = bool(
+                saved_preferences
+                and self._requests_saved_preferences(request.text)
+                and not (
+                    current_run
+                    and current_run.status == RunStatus.awaiting_input
+                    and current_run.graph is None
+                    and current_run.saved_preferences_applied
+                )
+            )
         run = (
             current_run
             if (
@@ -255,7 +292,9 @@ class Orchestrator:
                 request.text,
                 base_constraints,
                 preferences=(
-                    saved_preferences.model_dump(mode="json") if saved_preferences else {}
+                    saved_preferences.model_dump(mode="json")
+                    if memory_applied and saved_preferences
+                    else {}
                 ),
                 recent_messages=[
                     {"role": message.role, "content": message.text}
@@ -308,6 +347,19 @@ class Orchestrator:
                 ),
             },
         )
+        if preference_confirmation_requested:
+            run.preference_confirmation_pending = True
+            run.saved_preferences_applied = False
+            run.status = RunStatus.awaiting_input
+            run.phase = AgentPhase.awaiting_input
+            await self.store.save_run(run)
+            await self._message(
+                run,
+                MessageKind.clarification,
+                self._saved_preferences_confirmation(saved_preferences),
+                {"quick_replies": [], "confirmation": "saved_preferences"},
+            )
+            return run
         if constraints.missing_fields:
             run.status = RunStatus.awaiting_input
             run.phase = AgentPhase.awaiting_input
@@ -430,8 +482,19 @@ class Orchestrator:
                 await self._complete_task(
                     run,
                     location_task,
-                    f"Resolved {origin_airport} → {destination_airport}",
-                    "Airport identifiers were resolved by the controlled location registry",
+                    (
+                        f"Resolved airport route {origin_airport} → {destination_airport}"
+                        if origin_airport and destination_airport
+                        else "No complete airport pair; ground transport fallback is available"
+                    ),
+                    (
+                        "Airport identifiers were resolved by the controlled location registry"
+                        if origin_airport and destination_airport
+                        else (
+                            "Safar will search verified railway schedules and mapped road "
+                            "connections instead of inventing airport codes"
+                        )
+                    ),
                 )
 
             if not run.outbound_flights:
@@ -445,7 +508,9 @@ class Orchestrator:
                     run.constraints,
                 )
                 if not run.outbound_flights:
-                    raise NoResultsError("No outbound flights match the requested departure time")
+                    raise NoResultsError(
+                        "No outbound journey matches the requested departure time"
+                    )
                 await self.store.save_run(run)
                 await self._await_selection(run, "outbound_flight")
                 return False
@@ -465,7 +530,9 @@ class Orchestrator:
                     run.constraints,
                 )
                 if not run.return_flights:
-                    raise NoResultsError("No return flights match the requested departure time")
+                    raise NoResultsError(
+                        "No return journey matches the requested departure time"
+                    )
                 await self.store.save_run(run)
                 await self._await_selection(run, "return_flight")
                 return False
@@ -556,7 +623,10 @@ class Orchestrator:
                 run,
                 compare_task,
                 "Validated your three selected options",
-                "The chosen outbound flight, return flight, and stay satisfy the hard constraints",
+                (
+                    "The chosen outbound journey, return journey, and stay "
+                    "satisfy the hard constraints"
+                ),
             )
             await self._message(
                 run,
@@ -740,12 +810,12 @@ class Orchestrator:
             run.selected_outbound_id = selected.id
             task_id = "choose_outbound_flight"
             label = self._flight_label(selected)
-            noun = "flight there"
+            noun = "journey there"
         elif request.kind == "return_flight":
             run.selected_return_id = selected.id
             task_id = "choose_return_flight"
             label = self._flight_label(selected)
-            noun = "flight back"
+            noun = "journey back"
         else:
             run.selected_hotel_id = selected.id
             task_id = "choose_hotel"
@@ -814,7 +884,10 @@ class Orchestrator:
             task_id = "choose_outbound_flight"
             message_kind = MessageKind.flight_selection
             options = run.outbound_flights[:6]
-            text = "Choose your flight there. Tap an option or tell me your choice in chat."
+            text = (
+                "Choose your journey there. Safar may combine flights, trains, and "
+                "road connections when a direct route is unavailable."
+            )
             payload = {
                 "leg": "outbound",
                 "selection_kind": kind,
@@ -824,7 +897,10 @@ class Orchestrator:
             task_id = "choose_return_flight"
             message_kind = MessageKind.flight_selection
             options = run.return_flights[:6]
-            text = "Now choose your flight back. This is a separate live search."
+            text = (
+                "Now choose your journey back. Return routes are searched separately "
+                "and may use a different transport mix."
+            )
             payload = {
                 "leg": "return",
                 "selection_kind": kind,
@@ -913,8 +989,12 @@ class Orchestrator:
     @staticmethod
     def _flight_label(option: FlightLegOption) -> str:
         first = option.segments[0]
-        flight_number = f" {first.flight_number}" if first.flight_number else ""
-        return f"{first.airline}{flight_number} at {first.departure_at.strftime('%-I:%M %p')}"
+        service_number = f" {first.flight_number}" if first.flight_number else ""
+        modes = " + ".join(dict.fromkeys(segment.mode.title() for segment in option.segments))
+        return (
+            f"{modes}: {first.airline}{service_number} "
+            f"at {first.departure_at.strftime('%-I:%M %p')}"
+        )
 
     @staticmethod
     def _invalidate_final_plan(run: RunState) -> None:
@@ -947,9 +1027,15 @@ class Orchestrator:
     ) -> tuple[SelectionKind, str] | None:
         normalized = " ".join(text.lower().split())
         kind: SelectionKind | None = None
-        if re.search(r"\b(return|inbound|flight back|coming back)\b", normalized):
+        if re.search(
+            r"\b(return|inbound|flight back|train back|bus back|coming back)\b",
+            normalized,
+        ):
             kind = "return_flight"
-        elif re.search(r"\b(outbound|departure|flight there|going flight)\b", normalized):
+        elif re.search(
+            r"\b(outbound|departure|flight there|train there|bus there|going flight)\b",
+            normalized,
+        ):
             kind = "outbound_flight"
         elif re.search(r"\b(hotel|stay|room|property)\b", normalized):
             kind = "hotel"
@@ -1159,7 +1245,21 @@ class Orchestrator:
         task = self._task(run, task_id)
         await self._start_task(run, task)
         errors: list[str] = []
-        for provider_index, provider in enumerate(self.tools.providers):
+        journey_task = task_id in {
+            "outbound_flight_search",
+            "return_flight_search",
+        }
+        has_airport_pair = bool(
+            run.constraints.origin_airport and run.constraints.destination_airport
+        )
+        search_providers = (
+            self.tools.providers
+            if not journey_task or has_airport_pair
+            else []
+        )
+        if journey_task and not has_airport_pair:
+            errors.append("No complete airport pair exists for the requested cities")
+        for provider_index, provider in enumerate(search_providers):
             method: Callable[[TravelConstraints], Awaitable[list[Any]]] = getattr(
                 provider, method_name
             )
@@ -1233,17 +1333,152 @@ class Orchestrator:
                         error_message,
                     )
                     break
-            if provider_index < len(self.tools.providers) - 1:
+            if provider_index < len(search_providers) - 1:
                 run.retries += 1
                 task.status = TaskStatus.retrying
                 await self.store.save_task(run, task)
                 await self.store.save_run(run)
+        if journey_task:
+            leg = "return" if task_id == "return_flight_search" else "outbound"
+            await self._resolve_rail_station_candidates(run)
+            task.status = TaskStatus.retrying
+            task.provider = (
+                "railradar+openstreetmap-road"
+                if self.tools.rail
+                else "openstreetmap-road"
+            )
+            task.reason = (
+                "No usable direct flight was found; decomposing the route into "
+                "railway and road legs"
+            )
+            await self.store.save_task(run, task)
+            await self._operation(
+                run,
+                task,
+                "No direct flight worked. Checking railway and road combinations.",
+                (
+                    "Rail schedules come from RailRadar; road connections use "
+                    "OpenStreetMap routing"
+                ),
+            )
+            try:
+                task.attempts += 1
+                run.provider_calls += 1 + int(self.tools.rail is not None)
+                results = await self.tools.search_fallback_journeys(
+                    run.constraints,
+                    leg,
+                )
+                await self._complete_task(
+                    run,
+                    task,
+                    f"Built {len(results)} railway/road journey options",
+                    (
+                        "The direct route was decomposed into selectable transport "
+                        "legs; estimated fares are labelled"
+                    ),
+                )
+                return results
+            except (ToolError, httpx.HTTPError) as error:
+                errors.append(
+                    f"multimodal fallback: {self._safe_external_error(error)}"
+                )
         task.status = TaskStatus.failed
         task.reason = "; ".join(errors)
         task.completed_at = utc_now()
         await self.store.save_task(run, task)
         await self.store.save_run(run)
         raise ToolError(task.reason or f"{task_id} failed")
+
+    async def _resolve_rail_station_candidates(self, run: RunState) -> None:
+        if (
+            not self.tools.rail
+            or not self.interpreter.has_model
+            or run.station_resolution_attempted
+        ):
+            return
+        cities = [
+            city
+            for city in (run.constraints.origin, run.constraints.destination)
+            if city
+        ]
+        if len(cities) != 2:
+            return
+        run.station_resolution_attempted = True
+        await self.store.save_run(run)
+        await self._event(
+            run,
+            event_type="model_started",
+            status="running",
+            summary="Sarvam is proposing railway station candidates.",
+            payload={"phase": "station_resolution"},
+        )
+        try:
+            resolution = await self.agent.resolve_rail_stations(cities=cities)
+            await self._record_model_call(run, resolution.metrics)
+            by_city = {
+                candidate.city.casefold().strip(): candidate
+                for candidate in resolution.value.candidates
+            }
+            accepted: dict[str, list[str]] = {}
+            for city in cities:
+                candidate = by_city.get(city.casefold().strip())
+                proposed = candidate.station_codes if candidate else []
+                accepted[city] = await self.tools.rail.validate_station_candidates(
+                    city,
+                    proposed,
+                )
+            run.constraints.origin_station_codes = accepted.get(cities[0], [])
+            run.constraints.destination_station_codes = accepted.get(cities[1], [])
+            if run.graph:
+                run.graph.constraints = run.constraints
+            run.assumptions = list(
+                dict.fromkeys(
+                    [
+                        *run.assumptions,
+                        (
+                            "Sarvam proposed railway station codes; RailRadar "
+                            "validated them before search"
+                        ),
+                    ]
+                )
+            )
+            await self.store.save_run(run)
+            await self._event(
+                run,
+                event_type="station_candidates_validated",
+                status="completed",
+                summary=(
+                    "RailRadar validated "
+                    f"{sum(len(value) for value in accepted.values())} "
+                    "Sarvam station candidates."
+                ),
+                payload={
+                    "origin_candidates": run.constraints.origin_station_codes,
+                    "destination_candidates": (
+                        run.constraints.destination_station_codes
+                    ),
+                },
+            )
+        except SarvamModelError as error:
+            await self._record_model_call(run, error.metrics)
+            run.assumptions = list(
+                dict.fromkeys(
+                    [
+                        *run.assumptions,
+                        (
+                            "Sarvam station resolution was unavailable; "
+                            "RailRadar's validated deterministic lookup was used"
+                        ),
+                    ]
+                )
+            )
+            await self.store.save_run(run)
+        except (ToolError, httpx.HTTPError) as error:
+            run.errors.append(
+                "Station candidate validation: "
+                f"{self._safe_external_error(error)}"
+            )
+            await self.store.save_run(run)
 
     async def _retry_single(
         self,
@@ -1531,6 +1766,11 @@ class Orchestrator:
     @staticmethod
     def _clarification(constraints: TravelConstraints) -> str:
         missing = set(constraints.missing_fields)
+        if "adults" in missing:
+            return (
+                "How many people are travelling? "
+                "Mention adults and children separately if relevant."
+            )
         if {"start_date", "end_date"} & missing:
             return "What exact dates should I plan for?"
         if "origin" in missing:
@@ -1571,6 +1811,94 @@ class Orchestrator:
             f"a hard constraint. The most common conflict was: {common}. "
             "Which constraint may I change?"
         )
+
+    @staticmethod
+    def _requests_saved_preferences(text: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:usual|saved|previous|past)\s+preferences?\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _preference_confirmation_decision(text: str) -> bool | None:
+        normalized = " ".join(text.casefold().split())
+        if re.search(
+            r"^(?:no|nope|nah)\b|"
+            r"\b(?:do not|don't|dont)\s+(?:apply|use)\b|"
+            r"\b(?:skip|ignore)\s+(?:them|those|my (?:usual|saved) preferences?)\b",
+            normalized,
+        ):
+            return False
+        if re.search(
+            r"^(?:yes|yep|yeah|sure|okay|ok)\b|"
+            r"\b(?:apply|use)\s+(?:them|those|my (?:usual|saved) preferences?)\b",
+            normalized,
+        ):
+            return True
+        return None
+
+    @staticmethod
+    def _saved_preferences_confirmation(
+        preferences: UserPreferences | None,
+    ) -> str:
+        if not preferences:
+            return (
+                "I couldn't find any saved preferences for this account, so I won't "
+                "apply any. Tell me the preferences you want for this trip."
+            )
+        details: list[str] = []
+        if preferences.home_city:
+            details.append(f"depart from {preferences.home_city}")
+        if preferences.avoid_early_flights:
+            earliest = str(
+                preferences.preferences.get("earliest_departure") or "08:00"
+            )
+            details.append(f"avoid flights before {earliest}")
+        if preferences.hotel_preference:
+            details.append(f"stay near {preferences.hotel_preference}")
+        extra = list(preferences.preferences.get("preferences", []))
+        if extra:
+            details.append(", ".join(extra))
+        summary = "; ".join(details) or "no reusable trip settings"
+        return (
+            f"I found these saved preferences: {summary}. "
+            "Would you like me to apply them to this trip? Reply in chat with yes or no."
+        )
+
+    @classmethod
+    def _apply_confirmed_preferences(
+        cls,
+        current: TravelConstraints,
+        preferences: UserPreferences,
+    ) -> TravelConstraints:
+        saved = cls._constraints_from_preferences(preferences)
+        values = current.model_dump(
+            mode="python",
+            exclude={"missing_fields", "inferred_fields"},
+        )
+        applied_fields: list[str] = []
+        for field in (
+            "origin",
+            "origin_airport",
+            "earliest_departure",
+            "hotel_area_preference",
+            "max_hotel_distance_km",
+        ):
+            if values.get(field) is None and getattr(saved, field) is not None:
+                values[field] = getattr(saved, field)
+                applied_fields.append(field)
+        values["preferences"] = list(
+            dict.fromkeys([*current.preferences, *saved.preferences])
+        )
+        values["inferred_fields"] = list(
+            dict.fromkeys([*current.inferred_fields, *applied_fields])
+        )
+        merged = TravelConstraints.model_validate(values)
+        merged.missing_fields = merged.required_missing()
+        return merged
 
     @staticmethod
     def _constraints_from_preferences(preferences: UserPreferences) -> TravelConstraints:

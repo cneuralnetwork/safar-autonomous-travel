@@ -28,10 +28,6 @@ publishes run updates to Supabase Realtime; do not expose the secret key to Expo
 
 ### 2. Google Cloud
 
-Create one Google Cloud project and enable:
-
-- Places API (New), if live attraction search is required
-
 Configure an external OAuth consent screen. For testing, add judge Google
 accounts as test users. Create a **Web application** OAuth client with:
 
@@ -51,18 +47,31 @@ Set:
 ```env
 GOOGLE_CLIENT_ID=794463475484-cd5fuuenapv78tb3infpoiruvebtbhtr.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=...
-GOOGLE_MAPS_API_KEY=...
 ```
 
 Basic sign-in requests only `openid`, `email`, and `profile`. Safar creates a
 portable `.ics` file on the traveller’s device, so it does not request a Google
 Calendar scope or access a calendar account.
 
-Restrict `GOOGLE_MAPS_API_KEY` to Places API (New) and the Render service.
-The same API verifies hotel distance when “near the beach” or another location
-constraint is treated as a hard requirement.
+Google is used only for account authentication. It is not used for maps,
+geocoding, attraction search, hotel-distance verification, or calendar access.
 
-### 3. Sarvam AI
+### 3. OpenStreetMap
+
+No map API key is required. Leaflet renders OpenStreetMap tiles in the Expo DOM
+component on web, Android, and iOS. The backend resolves destinations with
+Nominatim and queries named attractions through Overpass:
+
+```env
+NOMINATIM_BASE_URL=https://nominatim.openstreetmap.org
+OVERPASS_BASE_URL=https://overpass-api.de/api
+```
+
+Safar rate-limits and caches Nominatim lookups, identifies itself with a custom
+user agent, retains OpenStreetMap attribution, and stores the returned OSM
+coordinates and entity links on itinerary places.
+
+### 4. Sarvam AI
 
 Create an API subscription key and set:
 
@@ -76,7 +85,7 @@ The backend uses the OpenAI-compatible
 and the `api-subscription-key` header. In production, exhausted model retries
 pause the run visibly instead of silently switching to a rule-only planner.
 
-### 4. Travel search
+### 5. Travel search
 
 Primary provider:
 
@@ -99,6 +108,37 @@ AMADEUS_ENV=production
 
 Use Amadeus Self-Service production credentials for live prices. Test
 credentials use `AMADEUS_ENV=test`.
+
+Railway fallback:
+
+```env
+RAILRADAR_API_KEY=rr_live_...
+RAILRADAR_BASE_URL=https://api.railradar.in
+```
+
+Create a RailRadar developer key at `https://railradar.in/docs`. Safar uses
+RailRadar's station lookup and date-filtered trains-between-stations endpoints.
+When a flight fallback starts, Sarvam may propose station-code candidates for
+the two cities. Those codes are never trusted directly: Safar checks each one
+against RailRadar's station lookup and rejects airport codes or stations whose
+name does not match the requested city. A deterministic gateway map remains the
+fallback when every model candidate is rejected.
+RailRadar supplies railway schedules, train numbers, durations, intermediate
+halts, and optional live operational data. It does not currently supply ticket
+fares or seat availability, so Safar labels railway prices as estimates and
+asks the traveller to verify inventory before booking.
+
+When no direct flight works, Safar searches RailRadar and can join a train to
+an OpenStreetMap/OSRM road connector for destinations without a practical
+railhead. Direct road alternatives use:
+
+```env
+OSRM_BASE_URL=https://router.project-osrm.org
+```
+
+Road distance and duration come from the mapped route. Bus departure times and
+fares remain clearly labelled planning estimates unless a live coach inventory
+provider is added.
 
 ## Required application secrets
 

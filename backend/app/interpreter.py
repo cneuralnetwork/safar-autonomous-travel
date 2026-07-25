@@ -230,8 +230,19 @@ class RequestInterpreter:
             deterministic=deterministic,
             model=result.value,
         )
+        model_assumptions = result.value.assumptions
+        if merged.adults is None:
+            model_assumptions = [
+                assumption
+                for assumption in model_assumptions
+                if not re.search(
+                    r"\b(?:adults?|travellers?|travelers?|people|persons?)\b",
+                    assumption,
+                    flags=re.IGNORECASE,
+                )
+            ]
         combined_assumptions = list(
-            dict.fromkeys([*assumptions, *result.value.assumptions])
+            dict.fromkeys([*assumptions, *model_assumptions])
         )
         quick_replies = (
             result.value.quick_replies
@@ -355,15 +366,49 @@ class RequestInterpreter:
                     values["duration_days"] = number
                     break
 
+        explicit_adults = re.search(r"\b(\d+)\s+adults?\b", lower)
+        explicit_children = re.search(r"\b(\d+)\s+(?:children|child|kids?)\b", lower)
         people_match = re.search(
-            r"\b(\d+)\s+(?:people|persons|adults|travellers|travelers)\b", lower
+            r"\b(\d+)\s+(?:people|persons?|travellers?|travelers?)\b", lower
         )
-        if people_match:
+        if explicit_adults:
+            values["adults"] = int(explicit_adults.group(1))
+        elif people_match:
             values["adults"] = int(people_match.group(1))
         else:
             for word, number in NUMBER_WORDS.items():
-                if re.search(rf"\bfor\s+{word}\s+(?:people|adults|travellers|travelers)\b", lower):
+                if re.search(
+                    rf"\b(?:for\s+)?{word}\s+"
+                    r"(?:people|persons?|adults?|travellers?|travelers?)\b",
+                    lower,
+                ):
                     values["adults"] = number
+                    break
+        if (
+            values.get("adults") is None
+            and current
+            and "adults" in (current.missing_fields or current.required_missing())
+        ):
+            contextual_count = re.fullmatch(
+                r"\s*(?:we(?:'re| are)\s+|there are\s+|for\s+)?"
+                r"(\d+|one|two|three|four|five|six|seven|eight|nine)"
+                r"(?:\s+(?:of us|adults?|people|persons?|travellers?|travelers?))?"
+                r"\s*[.!]?\s*",
+                lower,
+            )
+            if contextual_count:
+                raw_count = contextual_count.group(1)
+                values["adults"] = (
+                    int(raw_count)
+                    if raw_count.isdigit()
+                    else NUMBER_WORDS[raw_count]
+                )
+        if explicit_children:
+            values["children"] = int(explicit_children.group(1))
+        else:
+            for word, number in NUMBER_WORDS.items():
+                if re.search(rf"\b{word}\s+(?:children|child|kids?)\b", lower):
+                    values["children"] = number
                     break
 
         time_match = re.search(
@@ -518,6 +563,13 @@ class RequestInterpreter:
                 or self._contains_explicit_date(text)
             ):
                 continue
+            if field == "adults" and not (
+                (current and current.adults is not None)
+                or self._contains_explicit_travellers(text)
+            ):
+                continue
+            if field == "children" and not self._contains_explicit_travellers(text):
+                continue
             values[field] = value
 
         deterministic_values = deterministic.model_dump(
@@ -576,6 +628,16 @@ class RequestInterpreter:
         )
 
     @staticmethod
+    def _contains_explicit_travellers(text: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine)\s+"
+                r"(?:people|persons?|adults?|children|child|kids?|travellers?|travelers?)\b",
+                text.lower(),
+            )
+        )
+
+    @staticmethod
     def _fallback_message(constraints: TravelConstraints) -> str:
         return (
             f"I understood a {constraints.duration_days or 'multi-day'} trip from "
@@ -598,12 +660,6 @@ class RequestInterpreter:
     ) -> list[str]:
         lower = text.lower()
         assumptions: list[str] = []
-        if current is None and constraints.adults == 1 and not re.search(
-            r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine)\s+"
-            r"(?:people|persons|adults|travellers|travelers)\b",
-            lower,
-        ):
-            assumptions.append("Assumed 1 adult traveller")
         if "next weekend" in lower and constraints.start_date and constraints.end_date:
             assumptions.append(
                 "Interpreted next weekend as "

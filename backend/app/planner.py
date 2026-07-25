@@ -76,8 +76,8 @@ def build_task_graph(
         task(
             task_id="resolve_locations",
             tool_name="resolve_locations",
-            title="Resolve airports",
-            description="Resolve safe IATA codes for the requested cities",
+            title="Resolve transport hubs",
+            description="Resolve safe airport and railway starting points for the requested cities",
             dependencies=["resolve_constraints"],
             status=(
                 TaskStatus.completed
@@ -93,29 +93,35 @@ def build_task_graph(
         task(
             task_id="outbound_flight_search",
             tool_name="search_outbound_flights",
-            title="Find flights there",
-            description="Search one-way departure options matching the route and timing",
+            title="Find journeys there",
+            description=(
+                "Search one-way flights, then decompose unavailable routes into "
+                "RailRadar train and mapped road legs"
+            ),
             dependencies=["resolve_locations"],
         ),
         task(
             task_id="choose_outbound_flight",
             tool_name="choose_outbound_flight",
-            title="Choose your flight there",
-            description="Pause so the traveller can choose or change the outbound flight",
+            title="Choose your journey there",
+            description="Pause so the traveller can choose or change the outbound journey",
             dependencies=["outbound_flight_search"],
         ),
         task(
             task_id="return_flight_search",
             tool_name="search_return_flights",
-            title="Find flights back",
-            description="Make a separate one-way search for the return date",
+            title="Find journeys back",
+            description=(
+                "Search the return independently, including railway and road "
+                "fallbacks when no direct flight works"
+            ),
             dependencies=["choose_outbound_flight"],
         ),
         task(
             task_id="choose_return_flight",
             tool_name="choose_return_flight",
-            title="Choose your flight back",
-            description="Pause so the traveller can choose or change the return flight",
+            title="Choose your journey back",
+            description="Pause so the traveller can choose or change the return journey",
             dependencies=["return_flight_search"],
         ),
         task(
@@ -144,7 +150,7 @@ def build_task_graph(
             task_id="compare_packages",
             tool_name="compare_options",
             title="Compare combinations",
-            description="Validate and rank flight-hotel packages deterministically",
+            description="Validate and rank transport-and-stay packages deterministically",
             dependencies=["choose_return_flight", "choose_hotel"],
         ),
         task(

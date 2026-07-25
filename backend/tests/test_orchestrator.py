@@ -37,7 +37,6 @@ async def build_orchestrator(path: Path) -> tuple[Orchestrator, UserIdentity]:
         travel_provider_mode="demo",
         sarvam_api_key=None,
         serpapi_api_key=None,
-        google_maps_api_key=None,
         amadeus_client_id=None,
         amadeus_client_secret=None,
     )
@@ -201,6 +200,40 @@ async def test_message_idempotency_does_not_create_second_run(tmp_path: Path) ->
     assert user_messages[0].run_id == first.id
 
 
+async def test_missing_traveller_count_is_asked_then_resolved_in_chat(
+    tmp_path: Path,
+) -> None:
+    orchestrator, user = await build_orchestrator(tmp_path / "traveller-question.db")
+    snapshot = await orchestrator.create_conversation(
+        user,
+        "plan a 3-day trip from Kolkata to Goa next weekend under ₹30,000",
+        False,
+    )
+
+    awaiting = snapshot.active_run
+    assert awaiting is not None
+    assert awaiting.status == RunStatus.awaiting_input
+    assert awaiting.graph is None
+    assert awaiting.constraints.adults is None
+    assert awaiting.constraints.missing_fields == ["adults"]
+    assert snapshot.messages[-1].text.startswith("How many people are travelling?")
+
+    resumed = await orchestrator.handle_message(
+        user,
+        snapshot.conversation.id,
+        SendMessageRequest(
+            text="2 adults and 1 child",
+            idempotency_key="traveller-answer",
+        ),
+    )
+
+    assert resumed.id == awaiting.id
+    assert resumed.constraints.adults == 2
+    assert resumed.constraints.children == 1
+    assert resumed.constraints.missing_fields == []
+    assert resumed.graph is not None
+
+
 async def test_traveller_chooses_each_leg_and_can_change_it_in_chat(
     tmp_path: Path,
 ) -> None:
@@ -303,7 +336,9 @@ async def test_traveller_chooses_each_leg_and_can_change_it_in_chat(
     assert revised.approval.payload_hash != previous_hash
 
 
-async def test_usual_preferences_are_reused_in_a_new_conversation(tmp_path: Path) -> None:
+async def test_saved_preferences_require_confirmation_before_they_are_reused(
+    tmp_path: Path,
+) -> None:
     orchestrator, user = await build_orchestrator(tmp_path / "preferences.db")
     first = await orchestrator.create_conversation(
         user,
@@ -323,13 +358,85 @@ async def test_usual_preferences_are_reused_in_a_new_conversation(tmp_path: Path
 
     run = second.active_run
     assert run is not None
-    assert run.constraints.origin == "Kolkata"
-    assert run.constraints.origin_airport == "CCU"
+    assert run.preference_confirmation_pending
+    assert not run.saved_preferences_applied
+    assert run.constraints.origin is None
+    assert run.constraints.origin_airport is None
     assert run.constraints.destination == "Jaipur"
-    assert run.constraints.earliest_departure is not None
-    assert run.constraints.earliest_departure.hour == 8
-    assert run.constraints.hotel_area_preference == "beach"
-    assert run.constraints.missing_fields == []
+    assert run.constraints.earliest_departure is None
+    assert run.constraints.hotel_area_preference is None
+    assert second.messages[-1].kind == "clarification"
+    assert "Would you like me to apply them" in second.messages[-1].text
+
+    confirmed = await orchestrator.handle_message(
+        user,
+        second.conversation.id,
+        SendMessageRequest(
+            text="yes, apply them",
+            idempotency_key="confirm-saved-preferences",
+        ),
+    )
+
+    assert not confirmed.preference_confirmation_pending
+    assert confirmed.saved_preferences_applied
+    assert confirmed.constraints.origin == "Kolkata"
+    assert confirmed.constraints.origin_airport == "CCU"
+    assert confirmed.constraints.destination == "Jaipur"
+    assert confirmed.constraints.earliest_departure is not None
+    assert confirmed.constraints.earliest_departure.hour == 8
+    assert confirmed.constraints.hotel_area_preference == "beach"
+    assert confirmed.constraints.adults is None
+    assert confirmed.constraints.missing_fields == ["adults"]
+    after_confirmation = await orchestrator.snapshot(user, second.conversation.id)
+    assert after_confirmation.messages[-1].text.startswith(
+        "How many people are travelling?"
+    )
+
+
+async def test_declining_saved_preferences_keeps_them_out_of_the_trip(
+    tmp_path: Path,
+) -> None:
+    orchestrator, user = await build_orchestrator(tmp_path / "decline-preferences.db")
+    await orchestrator.create_conversation(
+        user,
+        (
+            "plan a 3-day trip from Kolkata to Goa next weekend for two people "
+            "under ₹30,000, avoid flights before 8 am and stay near the beach"
+        ),
+        False,
+    )
+    second = await orchestrator.create_conversation(
+        user,
+        (
+            "plan from Mumbai to Jaipur next weekend for one person under ₹35,000 "
+            "with my usual preferences"
+        ),
+        False,
+    )
+
+    pending = second.active_run
+    assert pending is not None
+    assert pending.preference_confirmation_pending
+    assert pending.constraints.origin == "Mumbai"
+    assert pending.constraints.earliest_departure is None
+    assert pending.constraints.hotel_area_preference is None
+
+    declined = await orchestrator.handle_message(
+        user,
+        second.conversation.id,
+        SendMessageRequest(
+            text="no, don't use them",
+            idempotency_key="decline-saved-preferences",
+        ),
+    )
+
+    assert not declined.preference_confirmation_pending
+    assert not declined.saved_preferences_applied
+    assert declined.constraints.origin == "Mumbai"
+    assert declined.constraints.origin_airport == "BOM"
+    assert declined.constraints.earliest_departure is None
+    assert declined.constraints.hotel_area_preference is None
+    assert declined.constraints.missing_fields == []
 
 
 async def test_running_workflow_is_resumed_from_persistent_state(tmp_path: Path) -> None:
@@ -337,7 +444,7 @@ async def test_running_workflow_is_resumed_from_persistent_state(tmp_path: Path)
     first, user = await build_orchestrator(database)
     snapshot = await first.create_conversation(user, None, False)
     constraints = await first.interpreter.interpret(
-        "plan a 3-day trip from Kolkata to Goa next weekend under ₹30,000"
+        "plan a 3-day trip from Kolkata to Goa next weekend for one person under ₹30,000"
     )
     run = RunState(
         conversation_id=snapshot.conversation.id,
@@ -369,7 +476,7 @@ async def test_recovery_preserves_a_completed_traveller_choice(tmp_path: Path) -
     first, user = await build_orchestrator(database)
     snapshot = await first.create_conversation(user, None, False)
     constraints = await first.interpreter.interpret(
-        "plan a 3-day trip from Kolkata to Goa next weekend under ₹40,000"
+        "plan a 3-day trip from Kolkata to Goa next weekend for one person under ₹40,000"
     )
     outbound = await first.tools.demo.search_outbound_flights(constraints)
     run = RunState(
@@ -413,7 +520,7 @@ async def test_approval_edit_starts_a_revised_run_with_existing_constraints(
         user,
         (
             "plan a 3-day trip from Kolkata to Goa next weekend under ₹30,000, "
-            "avoid flights before 8 am"
+            "for one person, avoid flights before 8 am"
         ),
         False,
     )
@@ -451,7 +558,7 @@ async def test_place_search_failure_keeps_the_valid_trip_and_labels_flexible_tim
     orchestrator.tools.places.search = AsyncMock(side_effect=TemporaryToolError("places timeout"))
     snapshot = await orchestrator.create_conversation(
         user,
-        "plan a 3-day trip from Kolkata to Goa next weekend under ₹30,000",
+        "plan a 3-day trip from Kolkata to Goa next weekend for one person under ₹30,000",
         False,
     )
 
@@ -498,8 +605,8 @@ async def test_sarvam_controls_interpretation_and_planning_with_durable_telemetr
                 budget=40_000,
                 adults=1,
             ),
-            explicit_fields=["origin", "destination", "budget"],
-            inferred_fields=["start_date", "end_date", "adults"],
+                explicit_fields=["origin", "destination", "budget", "adults"],
+                inferred_fields=["start_date", "end_date"],
             assumptions=["Using Friday through Sunday for next weekend."],
             assistant_message="I have the route, weekend, and budget.",
         ),
@@ -538,7 +645,7 @@ async def test_sarvam_controls_interpretation_and_planning_with_durable_telemetr
 
     snapshot = await orchestrator.create_conversation(
         user,
-        "I wanna go to Jaipur from Chennai, budget 40000, next weekend",
+        "I wanna go to Jaipur from Chennai for one person, budget 40000, next weekend",
         False,
     )
     await choose_cheapest_trip(
@@ -612,7 +719,7 @@ async def test_sarvam_plan_failure_uses_the_validated_fallback_graph(
 
     snapshot = await orchestrator.create_conversation(
         user,
-        "Plan a trip from Kolkata to Goa next weekend under ₹30,000",
+        "Plan a trip from Kolkata to Goa next weekend for one person under ₹30,000",
         False,
     )
     await choose_cheapest_trip(
@@ -672,9 +779,12 @@ async def test_exhausted_travel_providers_return_to_chat_for_replanning(
 ) -> None:
     orchestrator, user = await build_orchestrator(tmp_path / "provider-failure.db")
     orchestrator.tools.providers = [EmptyTravelProvider()]
+    orchestrator.tools.search_fallback_journeys = AsyncMock(
+        side_effect=NoResultsError("no railway or road journey")
+    )
     snapshot = await orchestrator.create_conversation(
         user,
-        "plan a 3-day trip from Kolkata to Goa next weekend under ₹30,000",
+        "plan a 3-day trip from Kolkata to Goa next weekend for one person under ₹30,000",
         False,
     )
 

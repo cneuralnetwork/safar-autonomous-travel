@@ -2,9 +2,11 @@
 
 Safar is a mobile-first autonomous travel agent. A traveller describes a trip in
 plain language, Safar resolves missing details in chat, searches outbound and
-return flights separately, pauses for the traveller to choose each flight and
-stay, applies hard constraints, and builds a day-by-day itinerary. The finished
-plan can be downloaded as a portable calendar file.
+return journeys separately, and pauses for the traveller to choose each route
+and stay. When a direct flight is unavailable, Safar can use RailRadar railway
+schedules and OpenStreetMap road connections to build a multimodal alternative.
+It then applies hard constraints and builds a day-by-day itinerary. The
+finished plan can be downloaded as a portable calendar file.
 
 The repository contains:
 
@@ -18,12 +20,17 @@ The repository contains:
 - No travel forms: every clarification happens in the conversation.
 - Google is the only sign-in method.
 - Search and planning are safe; Safar never books or spends money.
-- Outbound flight, return flight, and stay choices are persisted independently
+- Outbound journey, return journey, and stay choices are persisted independently
   and can be changed by tapping a card or speaking naturally in chat.
+- Railway schedules come from RailRadar. Since RailRadar does not expose fares
+  or seat inventory, estimated rail prices are visibly labelled and never
+  represented as confirmed tickets.
 - The LLM interprets intent, while deterministic code enforces constraints.
 - Every task, retry, fallback, rejection, and external action is recorded.
 - Sarvam plans and replans through strict schemas; it cannot invent or execute
   tools outside Safar's registry.
+- Sarvam can propose railway station codes, but RailRadar validates code
+  existence and city relevance before any timetable query is made.
 - Past trips and reusable preferences are persisted per Google account.
 - Interrupted planned/running workflows resume from persisted state after a
   service restart; traveller choice checkpoints never auto-select an option.

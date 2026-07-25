@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import math
 import random
+import re
+from dataclasses import dataclass
 from datetime import datetime, time, timedelta
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
@@ -742,60 +746,135 @@ class AmadeusProvider:
         return results
 
 
-class PlacesProvider:
+class OpenStreetMapPlacesProvider:
     def __init__(self, settings: Settings) -> None:
-        self.api_key = settings.google_maps_api_key
-        self.production = settings.production
-        self.client = httpx.AsyncClient(timeout=25)
-
-    async def search(self, constraints: TravelConstraints) -> list[PlaceOption]:
-        if not self.api_key:
-            if self.production:
-                raise ToolError("Google Places API is not configured")
-            return self._demo_places(constraints)
-        response = await self.client.post(
-            "https://places.googleapis.com/v1/places:searchText",
+        self.nominatim_base_url = settings.nominatim_base_url.rstrip("/")
+        self.overpass_base_url = settings.overpass_base_url.rstrip("/")
+        self.use_demo = (
+            settings.app_env.lower() == "test"
+            or settings.travel_provider_mode == "demo"
+        )
+        self.client = httpx.AsyncClient(
+            timeout=35,
             headers={
-                "Content-Type": "application/json",
-                "X-Goog-Api-Key": self.api_key,
-                "X-Goog-FieldMask": (
-                    "places.id,places.displayName,places.formattedAddress,"
-                    "places.location,places.rating,places.primaryType,"
-                    "places.googleMapsUri,places.photos"
+                "User-Agent": (
+                    "SafarTravelPlanner/1.0 "
+                    f"(travel itinerary service; {settings.public_base_url})"
                 ),
-            },
-            json={
-                "textQuery": (
-                    f"top attractions, beaches and local experiences in {constraints.destination}"
-                ),
-                "pageSize": 12,
-                "languageCode": "en",
-                "regionCode": "IN",
+                "Accept-Language": "en",
             },
         )
+        self._nominatim_lock = asyncio.Lock()
+        self._last_nominatim_request = 0.0
+        self._nominatim_cache: dict[str, list[dict[str, Any]]] = {}
+
+    async def search(self, constraints: TravelConstraints) -> list[PlaceOption]:
+        if self.use_demo:
+            return self._demo_places(constraints)
+        if not constraints.destination:
+            raise InvalidToolArguments("A destination is required for place search")
+
+        destination = await self._nominatim_search(
+            f"{constraints.destination}, India",
+            limit=1,
+        )
+        if not destination:
+            raise NoResultsError(
+                f"OpenStreetMap could not locate {constraints.destination}"
+            )
+        bounding_box = destination[0].get("boundingbox") or []
+        if len(bounding_box) != 4:
+            raise NoResultsError(
+                f"OpenStreetMap returned no usable boundary for {constraints.destination}"
+            )
+        south, north, west, east = (float(value) for value in bounding_box)
+        bbox = f"{south},{west},{north},{east}"
+        query = f"""
+[out:json][timeout:25];
+(
+  nwr["tourism"~"attraction|museum|gallery|viewpoint|zoo|theme_park"]({bbox});
+  nwr["historic"]({bbox});
+  nwr["natural"="beach"]({bbox});
+  nwr["leisure"~"park|nature_reserve"]({bbox});
+  nwr["amenity"="marketplace"]({bbox});
+);
+out center tags 80;
+""".strip()
+        response = await self.client.post(
+            f"{self.overpass_base_url}/interpreter",
+            data={"data": query},
+        )
         if response.status_code in {408, 429, 500, 502, 503, 504}:
-            raise TemporaryToolError(f"Google Places returned {response.status_code}")
+            raise TemporaryToolError(
+                f"OpenStreetMap Overpass returned {response.status_code}"
+            )
         response.raise_for_status()
         results: list[PlaceOption] = []
-        for item in response.json().get("places") or []:
-            location = item.get("location") or {}
-            if "latitude" not in location or "longitude" not in location:
+        seen_names: set[str] = set()
+        for item in response.json().get("elements") or []:
+            tags = item.get("tags") or {}
+            name = tags.get("name:en") or tags.get("name")
+            center = item.get("center") or {}
+            latitude = item.get("lat", center.get("lat"))
+            longitude = item.get("lon", center.get("lon"))
+            if not name or latitude is None or longitude is None:
                 continue
-            results.append(
-                PlaceOption(
-                    id=item.get("id") or str(uuid4()),
-                    name=(item.get("displayName") or {}).get("text") or "Place",
-                    address=item.get("formattedAddress") or "",
-                    category=item.get("primaryType") or "attraction",
-                    rating=item.get("rating"),
-                    latitude=location["latitude"],
-                    longitude=location["longitude"],
-                    maps_url=item.get("googleMapsUri"),
+            normalized_name = str(name).casefold()
+            if normalized_name in seen_names:
+                continue
+            seen_names.add(normalized_name)
+            category = self._osm_category(tags)
+            osm_type = item.get("type")
+            osm_id = item.get("id")
+            address = ", ".join(
+                dict.fromkeys(
+                    str(value)
+                    for value in (
+                        tags.get("addr:housename"),
+                        tags.get("addr:street"),
+                        tags.get("addr:suburb"),
+                        tags.get("addr:city"),
+                        constraints.destination,
+                    )
+                    if value
                 )
             )
+            results.append(
+                PlaceOption(
+                    id=f"osm-{osm_type}-{osm_id or uuid4()}",
+                    name=str(name),
+                    address=address,
+                    category=category,
+                    latitude=float(latitude),
+                    longitude=float(longitude),
+                    duration_minutes=self._duration_for_category(category),
+                    maps_url=(
+                        f"https://www.openstreetmap.org/{osm_type}/{osm_id}"
+                        if osm_type in {"node", "way", "relation"} and osm_id
+                        else (
+                            "https://www.openstreetmap.org/"
+                            f"?mlat={latitude}&mlon={longitude}#map=17/{latitude}/{longitude}"
+                        )
+                    ),
+                )
+            )
+            if len(results) >= 12:
+                break
         if not results:
-            raise NoResultsError("Google Places returned no activities")
+            raise NoResultsError(
+                f"OpenStreetMap returned no named activities in {constraints.destination}"
+            )
         return results
+
+    async def geocode(self, query: str) -> tuple[float, float] | None:
+        results = await self._nominatim_search(query, limit=1)
+        if not results:
+            return None
+        latitude = results[0].get("lat")
+        longitude = results[0].get("lon")
+        if latitude is None or longitude is None:
+            return None
+        return float(latitude), float(longitude)
 
     async def enrich_hotel_distances(
         self,
@@ -808,35 +887,19 @@ class PlacesProvider:
             or all(hotel.distance_to_preference_km is not None for hotel in hotels)
         ):
             return hotels
-        if not self.api_key:
+        if self.use_demo:
             return hotels
-        response = await self.client.post(
-            "https://places.googleapis.com/v1/places:searchText",
-            headers={
-                "Content-Type": "application/json",
-                "X-Goog-Api-Key": self.api_key,
-                "X-Goog-FieldMask": "places.location",
-            },
-            json={
-                "textQuery": (
-                    f"{constraints.hotel_area_preference} places in {constraints.destination}"
-                ),
-                "pageSize": 10,
-                "languageCode": "en",
-                "regionCode": "IN",
-            },
+        locations = await self._nominatim_search(
+            (
+                f"{constraints.hotel_area_preference} in "
+                f"{constraints.destination}, India"
+            ),
+            limit=8,
         )
-        if response.status_code in {408, 429, 500, 502, 503, 504}:
-            raise TemporaryToolError(
-                f"Google Places distance verification returned {response.status_code}"
-            )
-        response.raise_for_status()
         reference_points = [
-            (float(location["latitude"]), float(location["longitude"]))
-            for item in response.json().get("places") or []
-            if (location := item.get("location"))
-            and "latitude" in location
-            and "longitude" in location
+            (float(item["lat"]), float(item["lon"]))
+            for item in locations
+            if item.get("lat") is not None and item.get("lon") is not None
         ]
         if not reference_points:
             return hotels
@@ -859,6 +922,60 @@ class PlacesProvider:
                     1,
                 )
         return hotels
+
+    async def _nominatim_search(
+        self,
+        query: str,
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        cache_key = f"{query.casefold()}|{limit}"
+        if cache_key in self._nominatim_cache:
+            return self._nominatim_cache[cache_key]
+        async with self._nominatim_lock:
+            if cache_key in self._nominatim_cache:
+                return self._nominatim_cache[cache_key]
+            remaining = 1.05 - (monotonic() - self._last_nominatim_request)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            try:
+                response = await self.client.get(
+                    f"{self.nominatim_base_url}/search",
+                    params={
+                        "q": query,
+                        "format": "jsonv2",
+                        "addressdetails": "1",
+                        "limit": str(limit),
+                    },
+                )
+            finally:
+                self._last_nominatim_request = monotonic()
+        if response.status_code in {408, 429, 500, 502, 503, 504}:
+            raise TemporaryToolError(
+                f"OpenStreetMap Nominatim returned {response.status_code}"
+            )
+        response.raise_for_status()
+        results = response.json()
+        if not isinstance(results, list):
+            raise ToolError("OpenStreetMap Nominatim returned invalid data")
+        self._nominatim_cache[cache_key] = results
+        return results
+
+    @staticmethod
+    def _osm_category(tags: dict[str, Any]) -> str:
+        for key in ("tourism", "historic", "natural", "leisure", "amenity"):
+            value = tags.get(key)
+            if value:
+                return str(value)
+        return "attraction"
+
+    @staticmethod
+    def _duration_for_category(category: str) -> int:
+        if category in {"museum", "gallery", "zoo", "theme_park"}:
+            return 150
+        if category in {"marketplace", "viewpoint", "beach"}:
+            return 90
+        return 120
 
     def _demo_places(self, constraints: TravelConstraints) -> list[PlaceOption]:
         destination = constraints.destination or "Goa"
@@ -887,10 +1004,604 @@ class PlacesProvider:
         ]
 
 
+STATION_ALIASES: dict[str, list[str]] = {
+    "agra": ["AGC", "AF"],
+    "ahmedabad": ["ADI"],
+    "amritsar": ["ASR"],
+    "bengaluru": ["SBC", "YPR", "KJM"],
+    "bangalore": ["SBC", "YPR", "KJM"],
+    "bhopal": ["BPL", "RKMP"],
+    "bhubaneswar": ["BBS"],
+    "chandigarh": ["CDG"],
+    "chennai": ["MAS", "MS", "TBM"],
+    "coimbatore": ["CBE"],
+    "dehradun": ["DDN"],
+    "delhi": ["NDLS", "DLI", "NZM", "ANVT"],
+    "new delhi": ["NDLS", "DLI", "NZM", "ANVT"],
+    "ernakulam": ["ERS", "ERN"],
+    "goa": ["MAO", "THVM", "VSG", "KRMI"],
+    "guwahati": ["GHY", "KYQ"],
+    "hyderabad": ["SC", "HYB", "KCG"],
+    "indore": ["INDB"],
+    "jaipur": ["JP"],
+    "jaisalmer": ["JSM"],
+    "jodhpur": ["JU"],
+    "kochi": ["ERS", "ERN"],
+    "kolkata": ["HWH", "SDAH", "KOAA", "SHM"],
+    "lucknow": ["LKO", "LJN"],
+    "madgaon": ["MAO"],
+    "mumbai": ["CSMT", "MMCT", "BDTS", "LTT", "BVI"],
+    "mysuru": ["MYS"],
+    "mysore": ["MYS"],
+    "nagpur": ["NGP"],
+    "patna": ["PNBE", "PPTA"],
+    "pondicherry": ["PDY"],
+    "puducherry": ["PDY"],
+    "pune": ["PUNE"],
+    "ranchi": ["RNC"],
+    "rishikesh": ["YNRK", "RKSH"],
+    "srinagar": ["SINA"],
+    "surat": ["ST"],
+    "udaipur": ["UDZ"],
+    "varanasi": ["BSB", "BSBS"],
+}
+
+# Destinations without a practical city-centre railhead are decomposed into a
+# RailRadar train leg plus a road connector. The road leg is calculated from
+# OpenStreetMap/OSRM and is always labelled as an estimate.
+RAIL_GATEWAYS: dict[str, tuple[str, str]] = {
+    "coorg": ("MYS", "Mysuru"),
+    "darjeeling": ("NJP", "New Jalpaiguri"),
+    "dharamshala": ("PTK", "Pathankot"),
+    "gangtok": ("NJP", "New Jalpaiguri"),
+    "gulmarg": ("SINA", "Srinagar"),
+    "ladakh": ("JAT", "Jammu Tawi"),
+    "leh": ("JAT", "Jammu Tawi"),
+    "manali": ("CDG", "Chandigarh"),
+    "mcleodganj": ("PTK", "Pathankot"),
+    "munnar": ("ERS", "Ernakulam"),
+    "ooty": ("CBE", "Coimbatore"),
+    "shimla": ("KLK", "Kalka"),
+    "spiti": ("CDG", "Chandigarh"),
+}
+
+SOUTH_RAILHEADS = {
+    "CBE",
+    "ERS",
+    "MAO",
+    "MAS",
+    "MYS",
+    "PDY",
+    "SBC",
+    "SC",
+    "TBM",
+    "YPR",
+}
+NORTH_RAILHEADS = {
+    "AGC",
+    "ASR",
+    "CDG",
+    "DLI",
+    "JAT",
+    "JP",
+    "KLK",
+    "NDLS",
+    "NZM",
+}
+EAST_RAILHEADS = {
+    "BBS",
+    "GHY",
+    "HWH",
+    "KOAA",
+    "PNBE",
+    "RNC",
+    "SDAH",
+}
+
+
+def _normalized_place(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+@dataclass(frozen=True)
+class RailEndpoint:
+    code: str
+    name: str
+    requested_city: str
+    road_connector_required: bool = False
+
+
+class OpenStreetMapRoadProvider:
+    name = "openstreetmap-road"
+
+    def __init__(
+        self,
+        settings: Settings,
+        places: OpenStreetMapPlacesProvider,
+    ) -> None:
+        self.base_url = settings.osrm_base_url.rstrip("/")
+        self.places = places
+        self.client = httpx.AsyncClient(timeout=35)
+        self._route_cache: dict[str, tuple[float, int]] = {}
+
+    async def search_leg(
+        self,
+        constraints: TravelConstraints,
+        leg: str,
+    ) -> list[FlightLegOption]:
+        is_return = leg == "return"
+        origin = constraints.destination if is_return else constraints.origin
+        destination = constraints.origin if is_return else constraints.destination
+        travel_date = constraints.end_date if is_return else constraints.start_date
+        if not origin or not destination or not travel_date:
+            raise InvalidToolArguments("Cities and date are required for a road fallback")
+        distance_km, duration_minutes = await self.route_metrics(origin, destination)
+        travellers = (constraints.adults or 1) + constraints.children
+        services = [
+            ("Intercity coach", 7, 1.0),
+            ("AC seater coach", 14, 1.18),
+            ("Overnight sleeper coach", 21, 1.34),
+        ]
+        results: list[FlightLegOption] = []
+        for index, (service, hour, fare_factor) in enumerate(services):
+            departure_at = datetime.combine(
+                travel_date,
+                time(hour=hour, minute=index * 10),
+                tzinfo=IST,
+            )
+            arrival_at = departure_at + timedelta(minutes=duration_minutes)
+            estimated_fare = math.ceil(
+                max(250, distance_km * 1.55 * fare_factor) * travellers
+            )
+            segment = FlightSegment(
+                airline=service,
+                flight_number=None,
+                departure_airport=origin,
+                arrival_airport=destination,
+                departure_at=departure_at,
+                arrival_at=arrival_at,
+                duration_minutes=duration_minutes,
+                mode="bus",
+                service_name=service,
+                departure_name=origin,
+                arrival_name=destination,
+                data_quality="estimated",
+                data_source="OpenStreetMap + OSRM",
+                distance_km=round(distance_km, 1),
+            )
+            identifier = hashlib.sha1(
+                f"{leg}|{origin}|{destination}|{travel_date}|{service}".encode()
+            ).hexdigest()[:12]
+            results.append(
+                FlightLegOption(
+                    id=f"osm-bus-{identifier}",
+                    provider=self.name,
+                    leg="return" if is_return else "outbound",
+                    segments=[segment],
+                    total_price=estimated_fare,
+                    stops=0,
+                    baggage="Confirm luggage allowance with the coach operator",
+                    route_type="direct",
+                    fare_is_estimate=True,
+                    schedule_is_live=False,
+                    source_note=(
+                        "Road distance and duration use OpenStreetMap routing; "
+                        "coach time and fare are planning estimates."
+                    ),
+                )
+            )
+        return results
+
+    async def connector_segment(
+        self,
+        origin: str,
+        destination: str,
+        *,
+        depart_at: datetime | None = None,
+        arrive_by: datetime | None = None,
+    ) -> tuple[FlightSegment, int]:
+        distance_km, duration_minutes = await self.route_metrics(origin, destination)
+        if arrive_by:
+            arrival_at = arrive_by
+            departure_at = arrival_at - timedelta(minutes=duration_minutes)
+        elif depart_at:
+            departure_at = depart_at
+            arrival_at = departure_at + timedelta(minutes=duration_minutes)
+        else:
+            raise InvalidToolArguments("A connector needs a departure or arrival time")
+        fare = math.ceil(max(150, distance_km * 1.75))
+        return (
+            FlightSegment(
+                airline="Road connector",
+                departure_airport=origin,
+                arrival_airport=destination,
+                departure_at=departure_at,
+                arrival_at=arrival_at,
+                duration_minutes=duration_minutes,
+                mode="bus",
+                service_name="Road connector",
+                departure_name=origin,
+                arrival_name=destination,
+                data_quality="estimated",
+                data_source="OpenStreetMap + OSRM",
+                distance_km=round(distance_km, 1),
+            ),
+            fare,
+        )
+
+    async def route_metrics(self, origin: str, destination: str) -> tuple[float, int]:
+        cache_key = f"{_normalized_place(origin)}|{_normalized_place(destination)}"
+        if cache_key in self._route_cache:
+            return self._route_cache[cache_key]
+        origin_coords, destination_coords = await asyncio.gather(
+            self.places.geocode(f"{origin}, India"),
+            self.places.geocode(f"{destination}, India"),
+        )
+        if not origin_coords or not destination_coords:
+            raise NoResultsError(f"Could not map the road route from {origin} to {destination}")
+        origin_lat, origin_lon = origin_coords
+        destination_lat, destination_lon = destination_coords
+        response = await self.client.get(
+            (
+                f"{self.base_url}/route/v1/driving/"
+                f"{origin_lon},{origin_lat};{destination_lon},{destination_lat}"
+            ),
+            params={"overview": "false", "steps": "false"},
+        )
+        if response.status_code in {408, 429, 500, 502, 503, 504}:
+            raise TemporaryToolError(f"OSRM road routing returned {response.status_code}")
+        response.raise_for_status()
+        routes = response.json().get("routes") or []
+        if not routes:
+            raise NoResultsError(f"No drivable route was found from {origin} to {destination}")
+        distance_km = float(routes[0]["distance"]) / 1000
+        driving_minutes = max(1, math.ceil(float(routes[0]["duration"]) / 60))
+        # Scheduled coaches are slower than a private car and take rest stops.
+        bus_minutes = math.ceil(driving_minutes * 1.22)
+        bus_minutes += max(0, bus_minutes // 240) * 20
+        result = (distance_km, bus_minutes)
+        self._route_cache[cache_key] = result
+        return result
+
+
+class RailRadarProvider:
+    name = "railradar"
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        road: OpenStreetMapRoadProvider,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.road = road
+        self.client = httpx.AsyncClient(
+            timeout=35,
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        self._stations: dict[str, str] | None = None
+
+    async def search_leg(
+        self,
+        constraints: TravelConstraints,
+        leg: str,
+    ) -> list[FlightLegOption]:
+        is_return = leg == "return"
+        origin_city = constraints.destination if is_return else constraints.origin
+        destination_city = constraints.origin if is_return else constraints.destination
+        travel_date = constraints.end_date if is_return else constraints.start_date
+        if not origin_city or not destination_city or not travel_date:
+            raise InvalidToolArguments("Cities and date are required for railway search")
+        stations = await self._station_lookup()
+        origin_candidates = (
+            constraints.destination_station_codes
+            if is_return
+            else constraints.origin_station_codes
+        )
+        destination_candidates = (
+            constraints.origin_station_codes
+            if is_return
+            else constraints.destination_station_codes
+        )
+        origin = self._resolve_endpoint(origin_city, stations, origin_candidates)
+        destination = self._resolve_endpoint(
+            destination_city,
+            stations,
+            destination_candidates,
+        )
+        if not origin or not destination:
+            unresolved = origin_city if not origin else destination_city
+            raise NoResultsError(f"RailRadar could not resolve a railhead for {unresolved}")
+
+        response = await self.client.get(
+            f"{self.base_url}/v1/trains/between/{origin.code}/{destination.code}",
+            params={
+                "date": travel_date.isoformat(),
+                "live": "false",
+                "byCity": "true",
+            },
+        )
+        if response.status_code == 404:
+            raise NoResultsError(
+                f"RailRadar found no train from {origin.name} to {destination.name} "
+                f"on {travel_date.isoformat()}"
+            )
+        body = self._response_body(response, "trains-between-stations")
+        data = body.get("data") or {}
+        results: list[FlightLegOption] = []
+        for item in (data.get("trains") or [])[:10]:
+            normalized = await self._normalize_train(
+                item,
+                origin,
+                destination,
+                travel_date,
+                constraints,
+                leg,
+            )
+            if normalized:
+                results.append(normalized)
+        if not results:
+            raise NoResultsError(
+                f"RailRadar returned no usable trains for {origin.code} → {destination.code}"
+            )
+        results.sort(
+            key=lambda option: (
+                option.departure_at,
+                sum(segment.duration_minutes for segment in option.segments),
+            )
+        )
+        return results
+
+    async def _station_lookup(self) -> dict[str, str]:
+        if self._stations is not None:
+            return self._stations
+        response = await self.client.get(f"{self.base_url}/v1/lookup/stations")
+        body = self._response_body(response, "station lookup")
+        stations = body.get("data")
+        if not isinstance(stations, dict):
+            raise ToolError("RailRadar returned an invalid station lookup")
+        self._stations = {
+            str(code).upper(): str(name)
+            for code, name in stations.items()
+            if code and name
+        }
+        return self._stations
+
+    def _resolve_endpoint(
+        self,
+        city: str,
+        stations: dict[str, str],
+        candidate_codes: list[str] | None = None,
+    ) -> RailEndpoint | None:
+        normalized = _normalized_place(city)
+        for code in candidate_codes or []:
+            normalized_code = code.upper()
+            if normalized_code in stations:
+                return RailEndpoint(
+                    code=normalized_code,
+                    name=stations[normalized_code],
+                    requested_city=city,
+                    road_connector_required=normalized in RAIL_GATEWAYS,
+                )
+        if normalized in RAIL_GATEWAYS:
+            code, gateway = RAIL_GATEWAYS[normalized]
+            return RailEndpoint(
+                code=code,
+                name=stations.get(code, gateway),
+                requested_city=city,
+                road_connector_required=True,
+            )
+        aliases = STATION_ALIASES.get(normalized, [])
+        for code in aliases:
+            if code in stations:
+                return RailEndpoint(
+                    code=code,
+                    name=stations[code],
+                    requested_city=city,
+                )
+        scored: list[tuple[float, str, str]] = []
+        for code, name in stations.items():
+            normalized_name = _normalized_place(name)
+            contains = normalized in normalized_name or normalized_name.startswith(normalized)
+            score = difflib.SequenceMatcher(None, normalized, normalized_name).ratio()
+            if contains:
+                score += 0.45
+            if score >= 0.72:
+                scored.append((score, code, name))
+        if not scored:
+            return None
+        _, code, name = max(scored)
+        return RailEndpoint(code=code, name=name, requested_city=city)
+
+    async def validate_station_candidates(
+        self,
+        city: str,
+        candidate_codes: list[str],
+    ) -> list[str]:
+        stations = await self._station_lookup()
+        normalized_city = _normalized_place(city)
+        known_codes = set(STATION_ALIASES.get(normalized_city, []))
+        if normalized_city in RAIL_GATEWAYS:
+            known_codes.add(RAIL_GATEWAYS[normalized_city][0])
+        airport_codes = set(AIRPORTS.values())
+        accepted: list[str] = []
+        for raw_code in candidate_codes[:4]:
+            code = raw_code.strip().upper()
+            station_name = stations.get(code)
+            if not station_name or code in airport_codes:
+                continue
+            normalized_name = _normalized_place(station_name)
+            semantic_match = (
+                normalized_city in normalized_name
+                or normalized_name.startswith(normalized_city)
+                or difflib.SequenceMatcher(
+                    None,
+                    normalized_city,
+                    normalized_name,
+                ).ratio()
+                >= 0.72
+            )
+            if code in known_codes or semantic_match:
+                accepted.append(code)
+        return list(dict.fromkeys(accepted))
+
+    async def _normalize_train(
+        self,
+        item: dict[str, Any],
+        origin: RailEndpoint,
+        destination: RailEndpoint,
+        travel_date: Any,
+        constraints: TravelConstraints,
+        leg: str,
+    ) -> FlightLegOption | None:
+        train = item.get("train") or {}
+        source = item.get("from") or {}
+        target = item.get("to") or {}
+        number = str(train.get("number") or "")
+        name = str(train.get("name") or "Indian Railways train")
+        departure_clock = source.get("departure")
+        arrival_clock = target.get("arrival")
+        if not number or not departure_clock or not arrival_clock:
+            return None
+        try:
+            source_day = int(source.get("day") or 1)
+            target_day = int(target.get("day") or source_day)
+            departure_at = self._service_datetime(
+                travel_date,
+                str(departure_clock),
+                1,
+            )
+            arrival_at = self._service_datetime(
+                travel_date,
+                str(arrival_clock),
+                1 + max(0, target_day - source_day),
+            )
+        except (TypeError, ValueError):
+            return None
+        while arrival_at <= departure_at:
+            arrival_at += timedelta(days=1)
+        duration = int(
+            item.get("duration")
+            or max(1, (arrival_at - departure_at).total_seconds() // 60)
+        )
+        distance = float(item.get("distance") or 0)
+        travellers = (constraints.adults or 1) + constraints.children
+        rail_fare = self._estimated_fare(
+            distance,
+            str(train.get("type") or ""),
+            number,
+        ) * travellers
+        segments: list[FlightSegment] = []
+        connector_price = 0
+        if origin.road_connector_required:
+            connector, price = await self.road.connector_segment(
+                origin.requested_city,
+                origin.name,
+                arrive_by=departure_at - timedelta(minutes=45),
+            )
+            segments.append(connector)
+            connector_price += price * travellers
+        segments.append(
+            FlightSegment(
+                airline=name,
+                flight_number=number,
+                departure_airport=origin.code,
+                arrival_airport=destination.code,
+                departure_at=departure_at,
+                arrival_at=arrival_at,
+                duration_minutes=duration,
+                mode="train",
+                service_name=name,
+                departure_name=origin.name,
+                arrival_name=destination.name,
+                data_quality="scheduled",
+                data_source="RailRadar",
+                distance_km=distance or None,
+            )
+        )
+        if destination.road_connector_required:
+            connector, price = await self.road.connector_segment(
+                destination.name,
+                destination.requested_city,
+                depart_at=arrival_at + timedelta(minutes=30),
+            )
+            segments.append(connector)
+            connector_price += price * travellers
+        modes = {segment.mode for segment in segments}
+        return FlightLegOption(
+            id=f"railradar-{leg}-{number}-{origin.code}-{destination.code}",
+            provider=self.name,
+            leg="return" if leg == "return" else "outbound",
+            segments=segments,
+            total_price=math.ceil(rail_fare + connector_price),
+            stops=max(0, len(segments) - 1),
+            intermediate_stops=int(item.get("totalHaltsBetween") or 0),
+            baggage="Confirm luggage rules for each selected service",
+            booking_url=f"https://railradar.in/train-status/{number}",
+            route_type="multimodal" if len(modes) > 1 else "direct",
+            fare_is_estimate=True,
+            schedule_is_live=False,
+            source_note=(
+                "Train schedule from RailRadar. Fare is an estimate because "
+                "RailRadar does not provide ticket price or seat availability."
+            ),
+        )
+
+    @staticmethod
+    def _service_datetime(travel_date: Any, clock: str, service_day: int) -> datetime:
+        hour, minute = (int(part) for part in clock.split(":", 1))
+        return datetime.combine(
+            travel_date + timedelta(days=max(0, service_day - 1)),
+            time(hour=hour, minute=minute),
+            tzinfo=IST,
+        )
+
+    @staticmethod
+    def _estimated_fare(distance_km: float, train_type: str, number: str) -> int:
+        normalized_type = train_type.casefold()
+        if any(value in normalized_type for value in ("rajdhani", "vande", "shatabdi")):
+            rate = 1.05
+        elif any(value in normalized_type for value in ("superfast", "express", "duronto")):
+            rate = 0.72
+        else:
+            rate = 0.48
+        variance = 1 + ((int(number[-2:]) if number[-2:].isdigit() else 0) % 5) * 0.035
+        return math.ceil(max(150, distance_km * rate * variance + 70))
+
+    @staticmethod
+    def _response_body(response: httpx.Response, operation: str) -> dict[str, Any]:
+        if response.status_code in {408, 429, 500, 502, 503, 504}:
+            raise TemporaryToolError(
+                f"RailRadar {operation} returned {response.status_code}"
+            )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            raise ToolError(
+                f"RailRadar {operation} failed: {response.status_code}"
+            ) from error
+        body = response.json()
+        if not body.get("success", True):
+            error = body.get("error") or {}
+            raise ToolError(str(error.get("message") or "RailRadar request failed"))
+        return body
+
+
 class TravelToolRegistry:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.demo = DemoTravelProvider()
+        self.places = OpenStreetMapPlacesProvider(settings)
+        self.road = OpenStreetMapRoadProvider(settings, self.places)
+        self.rail = (
+            RailRadarProvider(
+                settings.railradar_api_key,
+                settings.railradar_base_url,
+                self.road,
+            )
+            if settings.railradar_api_key
+            else None
+        )
         self.providers: list[Any] = []
         if settings.serpapi_api_key:
             self.providers.append(SerpApiProvider(settings.serpapi_api_key))
@@ -902,39 +1613,68 @@ class TravelToolRegistry:
                     settings.amadeus_env,
                 )
             )
-        if not settings.production or settings.travel_provider_mode == "demo":
+        if settings.travel_provider_mode == "demo" or (
+            not settings.production and not self.providers
+        ):
             self.providers.append(self.demo)
-        self.places = PlacesProvider(settings)
 
     def provider_names(self) -> list[str]:
-        return [provider.name for provider in self.providers]
+        names = [provider.name for provider in self.providers]
+        if self.rail:
+            names.append(self.rail.name)
+        names.append(self.road.name)
+        return names
 
     async def close(self) -> None:
         clients = [provider.client for provider in self.providers if hasattr(provider, "client")]
-        clients.append(self.places.client)
+        clients.extend([self.places.client, self.road.client])
+        if self.rail:
+            clients.append(self.rail.client)
+        unique_clients = list({id(client): client for client in clients}.values())
         await asyncio.gather(
-            *(client.aclose() for client in clients),
+            *(client.aclose() for client in unique_clients),
             return_exceptions=True,
         )
 
     async def resolve_locations(
         self,
         constraints: TravelConstraints,
-    ) -> tuple[str, str]:
+    ) -> tuple[str | None, str | None]:
         origin = constraints.origin_airport or AIRPORTS.get((constraints.origin or "").lower())
         destination = constraints.destination_airport or AIRPORTS.get(
             (constraints.destination or "").lower()
         )
-        if not origin or not destination:
-            unresolved = []
-            if not origin:
-                unresolved.append(constraints.origin or "departure city")
-            if not destination:
-                unresolved.append(constraints.destination or "destination city")
-            raise NoResultsError(
-                "Could not safely resolve an airport for " + " and ".join(unresolved)
-            )
         return origin, destination
+
+    async def search_fallback_journeys(
+        self,
+        constraints: TravelConstraints,
+        leg: str,
+    ) -> list[FlightLegOption]:
+        results: list[FlightLegOption] = []
+        errors: list[str] = []
+        if self.rail:
+            try:
+                results.extend(await self.rail.search_leg(constraints, leg))
+            except (ToolError, httpx.HTTPError) as error:
+                errors.append(str(error))
+        try:
+            results.extend(await self.road.search_leg(constraints, leg))
+        except (ToolError, httpx.HTTPError) as error:
+            errors.append(str(error))
+        if not results:
+            raise NoResultsError(
+                "; ".join(errors)
+                or "No flight, railway, or road journey could be built safely"
+            )
+        results.sort(
+            key=lambda option: (
+                option.fare_is_estimate,
+                option.total_price,
+                sum(segment.duration_minutes for segment in option.segments),
+            )
+        )
+        return results
 
     async def enrich_hotel_distances(
         self,
@@ -964,6 +1704,37 @@ def combine_flight_legs(
             if outbound.baggage == inbound.baggage
             else "Check each selected leg's fare rules"
         ),
+        route_type=(
+            "multimodal"
+            if (
+                outbound.route_type == "multimodal"
+                or inbound.route_type == "multimodal"
+                or len(
+                    {
+                        segment.mode
+                        for segment in [*outbound.segments, *inbound.segments]
+                    }
+                )
+                > 1
+            )
+            else (
+                "connected"
+                if outbound.route_type == "connected"
+                or inbound.route_type == "connected"
+                else "direct"
+            )
+        ),
+        fare_is_estimate=outbound.fare_is_estimate or inbound.fare_is_estimate,
+        schedule_is_live=outbound.schedule_is_live and inbound.schedule_is_live,
+        source_note=" · ".join(
+            dict.fromkeys(
+                note
+                for note in (outbound.source_note, inbound.source_note)
+                if note
+            )
+        )
+        or None,
+        intermediate_stops=outbound.intermediate_stops + inbound.intermediate_stops,
     )
 
 

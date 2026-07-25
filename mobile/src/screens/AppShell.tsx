@@ -1115,11 +1115,28 @@ function PlanOverview({
   const selected = run.selected_package;
   if (!selected) return null;
   const duration = run.itinerary?.days.length || run.constraints.duration_days || 0;
-  const travellers = run.constraints.adults + run.constraints.children;
+  const travellers =
+    (run.constraints.adults ?? 0) + run.constraints.children;
   const comfort = selected.hotel.rating || 0;
+  const selectedModes = Array.from(
+    new Set(
+      [...selected.flight.outbound, ...selected.flight.inbound].map(
+        (segment) => segment.mode || 'flight',
+      ),
+    ),
+  )
+    .map((mode) => mode.charAt(0).toUpperCase() + mode.slice(1))
+    .join(' + ');
   const highlights = [
     ...run.constraints.preferences,
-    `${selected.flight.stops ? `${selected.flight.stops}-stop` : 'Nonstop'} flights selected`,
+    `${
+      selected.flight.stops
+        ? `${selected.flight.stops} transport transfers`
+        : 'Direct journeys'
+    } selected`,
+    selected.flight.fare_is_estimate
+      ? 'Rail or road fare shown as an estimate'
+      : null,
     `${selected.hotel.name} · ${comfort ? `${comfort}★` : 'verified stay'}`,
     selected.remaining_budget != null
       ? `${formatCurrency(selected.remaining_budget)} kept as budget headroom`
@@ -1130,7 +1147,7 @@ function PlanOverview({
     meta: string;
     icon: keyof typeof Ionicons.glyphMap;
   }> = [
-    { label: 'Flights', meta: 'Return', icon: 'airplane-outline' },
+    { label: 'Journeys', meta: selectedModes, icon: 'navigate-outline' },
     {
       label: 'Hotels',
       meta: `${Math.max(1, duration - 1)} nights`,
@@ -1467,7 +1484,7 @@ function MapOverview({ run }: { run?: RunState }) {
           </Text>
         </View>
       </View>
-      <ItineraryMap itinerary={run.itinerary} />
+      <ItineraryMap itinerary={run.itinerary} expanded />
     </ScrollView>
   );
 }
@@ -1658,8 +1675,10 @@ function TripsScreen({
 const activityTitles: Record<string, string> = {
   understand_request: 'Understanding your trip',
   resolve_constraints: 'Confirming your travel details',
-  resolve_locations: 'Finding the right airports',
-  flight_search: 'Checking available flights',
+  resolve_locations: 'Finding nearby transport hubs',
+  flight_search: 'Checking available journeys',
+  outbound_flight_search: 'Checking routes for the journey there',
+  return_flight_search: 'Checking routes for the journey back',
   hotel_search: 'Finding stays that fit',
   place_search: 'Exploring things to do',
   compare_packages: 'Comparing the best combinations',
@@ -2059,15 +2078,21 @@ function constraintDetails(constraints?: TravelConstraints): Array<{
           icon: 'wallet-outline' as const,
         }
       : null,
-    {
-      label: 'Travellers',
-      value: `${constraints.adults} adult${constraints.adults === 1 ? '' : 's'}${
-        constraints.children
-          ? ` · ${constraints.children} child${constraints.children === 1 ? '' : 'ren'}`
-          : ''
-      }`,
-      icon: 'people-outline' as const,
-    },
+    constraints.adults != null
+      ? {
+          label: 'Travellers',
+          value: `${constraints.adults} adult${
+            constraints.adults === 1 ? '' : 's'
+          }${
+            constraints.children
+              ? ` · ${constraints.children} child${
+                  constraints.children === 1 ? '' : 'ren'
+                }`
+              : ''
+          }`,
+          icon: 'people-outline' as const,
+        }
+      : null,
     constraints.preferences.length
       ? {
           label: 'Preferences',

@@ -93,6 +93,18 @@ class ReplanDecision(StrictModel):
     constraint_to_relax: str | None = None
 
 
+class StationCodeCandidate(StrictModel):
+    city: str
+    station_codes: list[str] = Field(default_factory=list, max_length=4)
+    confidence: Literal["high", "medium", "low"]
+    needs_road_connector: bool = False
+    connector_city: str | None = None
+
+
+class StationResolution(StrictModel):
+    candidates: list[StationCodeCandidate] = Field(min_length=1, max_length=2)
+
+
 @dataclass(frozen=True)
 class ModelMetrics:
     phase: str
@@ -303,11 +315,12 @@ class SarvamAgent:
             max_tokens=4096,
             system=(
                 "You are Safar's travel request interpreter. Extract only facts supported by the "
-                "message or existing confirmed state. Infer normal defaults instead of asking "
-                "unnecessary questions: one adult if omitted, and Friday through Sunday for "
-                "'next weekend'. Preserve confirmed values unless the user changes them. Budget "
-                "is optional. Never invent an origin, destination, exact date, airport code, "
-                "price, or provider result. When a destination is known, classify its dominant "
+                "message or existing confirmed state. Never assume the number of travellers; "
+                "leave adults unresolved unless the user explicitly states a count. Friday "
+                "through Sunday is valid for 'next weekend'. Preserve confirmed values unless "
+                "the user changes them. Budget is optional. Never invent an origin, destination, "
+                "exact date, airport code, price, or provider result. When a destination is known, "
+                "classify its dominant "
                 "travel visual as exactly one visual_theme: coast for beaches and seaside cities; "
                 "mountains for hill, alpine, or high-altitude destinations; heritage for forts, "
                 "temples, and historic architecture; nature for forests, backwaters, and lush "
@@ -323,7 +336,13 @@ class SarvamAgent:
                 "saved_preferences": preferences,
                 "recent_messages": recent_messages[-12:],
                 "user_message": user_message,
-                "required_for_search": ["origin", "destination", "start_date", "end_date"],
+                "required_for_search": [
+                    "origin",
+                    "destination",
+                    "start_date",
+                    "end_date",
+                    "adults",
+                ],
             },
         )
 
@@ -341,9 +360,11 @@ class SarvamAgent:
             max_tokens=3200,
             system=(
                 "Create a compact dependency DAG for a travel-planning run using only the "
-                "registered tools. Search outbound flights first, pause for the traveller's "
-                "choice, then make a separate return-flight request and pause again. Search "
-                "hotels only after both flight choices, then pause for the stay choice. "
+                "registered tools. Search an outbound journey first, pause for the traveller's "
+                "choice, then make a separate return-journey request and pause again. A journey "
+                "search tries flights first and may safely fall back to RailRadar railway "
+                "schedules plus OpenStreetMap road connectors when no direct route works. "
+                "Search hotels only after both transport choices, then pause for the stay choice. "
                 "compare_options validates the three chosen items; create_itinerary depends on "
                 "a valid package and place search; request_approval must precede "
                 "add_calendar_events. "
@@ -380,6 +401,29 @@ class SarvamAgent:
                     "approval_before_calendar": True,
                 },
             },
+        )
+
+    async def resolve_rail_stations(
+        self,
+        *,
+        cities: list[str],
+    ) -> StructuredModelResult[StationResolution]:
+        return await self.gateway.structured(
+            phase="station_resolution",
+            prompt_version="rail-station-resolution-v1",
+            schema=StationResolution,
+            reasoning_effort="low",
+            max_tokens=4096,
+            system=(
+                "Propose Indian Railways station codes for exactly the supplied cities. "
+                "Return at most four codes per city, ordered by usefulness for an intercity "
+                "traveller. Never return an airport code. For a destination without a practical "
+                "railhead, propose a gateway railway station and mark needs_road_connector=true. "
+                "If uncertain, return an empty station_codes list and low confidence. These are "
+                "only candidates: a deterministic RailRadar lookup will validate every code. "
+                "Return no chain-of-thought."
+            ),
+            payload={"cities": cities[:2]},
         )
 
     async def replan(

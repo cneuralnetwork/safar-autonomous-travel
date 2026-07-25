@@ -27,12 +27,16 @@ class Settings(BaseSettings):
 
     google_client_id: str | None = None
     google_client_secret: str | None = None
-    google_maps_api_key: str | None = None
     token_encryption_key: str | None = None
 
     sarvam_api_key: str | None = None
     sarvam_model: str = "sarvam-105b"
     serpapi_api_key: str | None = None
+    railradar_api_key: str | None = None
+    railradar_base_url: str = "https://api.railradar.in"
+    nominatim_base_url: str = "https://nominatim.openstreetmap.org"
+    overpass_base_url: str = "https://overpass-api.de/api"
+    osrm_base_url: str = "https://router.project-osrm.org"
     amadeus_client_id: str | None = None
     amadeus_client_secret: str | None = None
     amadeus_env: str = "test"

@@ -36,14 +36,22 @@ services:
         value: sarvam-105b
       - key: SERPAPI_API_KEY
         sync: false
+      - key: RAILRADAR_API_KEY
+        sync: false
+      - key: RAILRADAR_BASE_URL
+        value: https://api.railradar.in
       - key: AMADEUS_CLIENT_ID
         sync: false
       - key: AMADEUS_CLIENT_SECRET
         sync: false
       - key: AMADEUS_ENV
         value: production
-      - key: GOOGLE_MAPS_API_KEY
-        sync: false
+      - key: NOMINATIM_BASE_URL
+        value: https://nominatim.openstreetmap.org
+      - key: OVERPASS_BASE_URL
+        value: https://overpass-api.de/api
+      - key: OSRM_BASE_URL
+        value: https://router.project-osrm.org
       - key: TRAVEL_PROVIDER_MODE
         value: auto
       - key: ENABLE_RESILIENCE_DEMO
