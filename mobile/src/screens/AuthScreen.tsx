@@ -2,141 +2,301 @@ import {
   ActivityIndicator,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { Image } from 'expo-image';
+import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { LinearGradient } from 'expo-linear-gradient';
+import {
+  SafeAreaView,
+  useSafeAreaInsets,
+} from 'react-native-safe-area-context';
 import { useAuth } from '@/auth/AuthProvider';
-import { BrandMark } from '@/components/BrandMark';
-import { colors, radius, shadow, type } from '@/theme';
+import { colors, fonts, gradients, radius, type } from '@/theme';
+
+const benefits = [
+  {
+    icon: 'airplane-outline',
+    title: 'AI plans everything for you',
+    detail: 'Flights, stays, itinerary & more',
+  },
+  {
+    icon: 'options-outline',
+    title: 'Best budget, time & comfort',
+    detail: 'Optimized for what matters to you',
+  },
+  {
+    icon: 'calendar-outline',
+    title: 'Saves to Google Calendar',
+    detail: 'With your approval, always',
+  },
+] as const;
 
 export function AuthScreen() {
   const { signInWithGoogle, signingIn, error } = useAuth();
-  const artwork = require('../../assets/generated/auth-journey.png');
+  const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
+  const artwork = require('../../assets/generated/onboarding-panorama.png');
+  const googleMark = require('../../assets/generated/google-g.png');
+  const frameWidth = Math.min(width, 480);
+  const heroHeight = Math.max(480, Math.min(525, frameWidth * 1.255));
+
   return (
-    <SafeAreaView style={styles.safe}>
-      <View style={styles.top}>
-        <BrandMark size={46} />
-        <Text style={styles.brand}>Safar</Text>
-      </View>
-      <View style={styles.hero}>
-        <Image source={artwork} style={styles.artwork} contentFit="cover" />
-      </View>
-      <View style={styles.copy}>
-        <Text style={styles.eyebrow}>An autonomous travel agent</Text>
-        <Text style={styles.title}>A complete trip, from one message.</Text>
-        <Text style={styles.body}>
-          Tell Safar where you want to go. It compares flights and stays, builds the
-          itinerary, and asks before touching your calendar.
-        </Text>
-      </View>
-      <View style={styles.actions}>
-        {error ? (
-          <View style={styles.error}>
-            <Ionicons name="alert-circle" size={18} color={colors.coral} />
-            <Text style={styles.errorText}>{error}</Text>
-          </View>
-        ) : null}
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Continue with Google"
-          disabled={signingIn}
-          onPress={() => void signInWithGoogle()}
-          style={({ pressed }) => [
-            styles.googleButton,
-            pressed && styles.pressed,
-            signingIn && styles.disabled,
-          ]}
+    <LinearGradient
+      colors={[colors.canvas, colors.surfaceViolet, colors.navyDeep]}
+      locations={[0, 0.56, 0.72]}
+      style={styles.screen}
+    >
+      <StatusBar style="dark" />
+      <SafeAreaView edges={['bottom']} style={styles.safe}>
+        <ScrollView
+          bounces={false}
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
         >
-          {signingIn ? (
-            <ActivityIndicator color={colors.ink} />
-          ) : (
-            <View style={styles.googleMark}>
-              <Text style={styles.googleLetter}>G</Text>
+          <View style={[styles.frame, { minHeight: heroHeight }]}>
+            <View style={[styles.hero, { height: heroHeight }]}>
+              <Image
+                accessible={false}
+                accessibilityIgnoresInvertColors
+                contentFit="cover"
+                contentPosition="center"
+                source={artwork}
+                style={StyleSheet.absoluteFill}
+              />
+              <View
+                style={[
+                  styles.heroCopy,
+                  { paddingTop: Math.max(76, insets.top + 48) },
+                ]}
+              >
+                <View
+                  accessible={false}
+                  importantForAccessibility="no-hide-descendants"
+                  style={styles.heroPlane}
+                >
+                  <Ionicons color={colors.navy} name="airplane" size={38} />
+                </View>
+                <Text accessibilityRole="header" style={styles.brand}>
+                  Safar
+                </Text>
+                <Text style={styles.tagline}>Your AI Travel Agent</Text>
+                <Text style={styles.description}>
+                  Describe your trip in plain language.{'\n'}
+                  We plan the best route, time & budget{'\n'}
+                  for you—automatically.
+                </Text>
+              </View>
             </View>
-          )}
-          <Text style={styles.googleText}>
-            {signingIn ? 'Waiting for Google…' : 'Continue with Google'}
-          </Text>
-        </Pressable>
-        <Text style={styles.legal}>
-          Google is the only sign-in method. Calendar access is requested separately,
-          only when you approve an itinerary.
-        </Text>
-      </View>
-    </SafeAreaView>
+
+            <LinearGradient colors={gradients.navy} style={styles.actions}>
+              {error ? (
+                <View
+                  accessibilityLiveRegion="polite"
+                  accessibilityRole="alert"
+                  style={styles.error}
+                >
+                  <Ionicons name="alert-circle" size={18} color={colors.coral} />
+                  <Text style={styles.errorText}>{error}</Text>
+                </View>
+              ) : null}
+
+              <Pressable
+                accessibilityHint="Opens Google sign-in. Calendar access is requested separately only after you approve a trip."
+                accessibilityLabel="Continue with Google"
+                accessibilityRole="button"
+                accessibilityState={{ busy: signingIn, disabled: signingIn }}
+                disabled={signingIn}
+                onPress={() => void signInWithGoogle()}
+                style={({ pressed }) => [
+                  styles.googleButton,
+                  pressed && styles.pressed,
+                  signingIn && styles.disabled,
+                ]}
+              >
+                {signingIn ? (
+                  <ActivityIndicator
+                    accessibilityLabel="Waiting for Google"
+                    color={colors.primary}
+                  />
+                ) : (
+                  <Image
+                    accessible={false}
+                    contentFit="contain"
+                    source={googleMark}
+                    style={styles.googleMark}
+                  />
+                )}
+                <Text style={styles.googleText}>
+                  {signingIn ? 'Waiting for Google…' : 'Continue with Google'}
+                </Text>
+              </Pressable>
+
+              <View style={styles.benefits}>
+                {benefits.map((benefit) => (
+                  <View key={benefit.title} style={styles.benefit}>
+                    <View style={styles.benefitIcon}>
+                      <Ionicons
+                        color={colors.surface}
+                        name={benefit.icon}
+                        size={20}
+                      />
+                    </View>
+                    <View style={styles.benefitCopy}>
+                      <Text style={styles.benefitTitle}>{benefit.title}</Text>
+                      <Text style={styles.benefitDetail}>{benefit.detail}</Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+
+              <View
+                accessibilityElementsHidden
+                importantForAccessibility="no-hide-descendants"
+                style={styles.pagination}
+              >
+                <View style={[styles.pageDot, styles.pageDotActive]} />
+                <View style={styles.pageDot} />
+                <View style={styles.pageDot} />
+              </View>
+            </LinearGradient>
+          </View>
+        </ScrollView>
+      </SafeAreaView>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
+  screen: {
+    flex: 1,
+    backgroundColor: colors.navyDeep,
+  },
   safe: {
     flex: 1,
-    width:
-      Platform.OS === 'web'
-        ? ('calc(100% - 40px)' as unknown as number)
-        : '100%',
+    width: '100%',
+  },
+  scrollContent: {
+    flexGrow: 1,
+    alignItems: 'center',
+  },
+  frame: {
+    width: '100%',
     maxWidth: 480,
-    alignSelf: 'center',
-    paddingHorizontal: 20,
-    paddingBottom: 16,
-    backgroundColor: colors.canvas,
+    overflow: 'hidden',
+    backgroundColor: colors.navyDeep,
     ...Platform.select({
       web: {
         boxSizing: 'border-box',
-        minHeight: '100vh' as unknown as number,
       },
       default: {},
     }),
   },
-  top: { flexDirection: 'row', alignItems: 'center', gap: 11, paddingTop: 8 },
-  brand: { ...type.section, color: colors.ink },
   hero: {
-    flex: 1,
-    minHeight: 250,
-    maxHeight: 390,
-    marginTop: 22,
-    borderRadius: 30,
+    position: 'relative',
+    width: '100%',
     overflow: 'hidden',
-    backgroundColor: colors.surface,
-    ...shadow,
+    backgroundColor: colors.surfaceViolet,
   },
-  artwork: { width: '100%', height: '100%' },
-  copy: { paddingTop: 28, gap: 10 },
-  eyebrow: {
-    ...type.caption,
-    color: colors.blue,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
+  heroCopy: {
+    alignItems: 'center',
+    paddingHorizontal: 24,
   },
-  title: { ...type.hero, color: colors.ink, maxWidth: 360 },
-  body: { ...type.body, color: colors.muted, maxWidth: 390 },
-  actions: { gap: 12, paddingTop: 24 },
+  heroPlane: {
+    width: 44,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    transform: [{ rotate: '-18deg' }],
+  },
+  brand: {
+    fontFamily: fonts.bold,
+    fontSize: 62,
+    lineHeight: 69,
+    letterSpacing: -2.7,
+    color: colors.navy,
+    marginTop: 5,
+  },
+  tagline: {
+    fontFamily: fonts.medium,
+    fontSize: 18,
+    lineHeight: 24,
+    color: colors.primary,
+    marginTop: -2,
+  },
+  description: {
+    ...type.body,
+    color: colors.muted,
+    textAlign: 'center',
+    marginTop: 20,
+  },
+  actions: {
+    paddingHorizontal: 20,
+    paddingTop: 10,
+    paddingBottom: 18,
+    gap: 11,
+  },
   googleButton: {
-    minHeight: 58,
+    minHeight: 54,
     borderRadius: radius.medium,
     backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: '#D6D8D6',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 12,
-    ...shadow,
   },
   googleMark: {
-    width: 27,
-    height: 27,
-    borderRadius: 9,
+    width: 22,
+    height: 22,
+  },
+  googleText: {
+    fontFamily: fonts.semiBold,
+    fontSize: 14,
+    lineHeight: 20,
+    color: colors.navy,
+  },
+  benefits: {
+    borderRadius: radius.large,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: 'rgba(255,255,255,0.035)',
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+  },
+  benefit: {
+    minHeight: 59,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  benefitIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: radius.small,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.canvas,
+    backgroundColor: 'rgba(255,255,255,0.1)',
   },
-  googleLetter: { fontSize: 16, fontWeight: '800', color: '#4285F4' },
-  googleText: { ...type.label, color: colors.ink },
-  legal: { ...type.caption, color: colors.muted, textAlign: 'center', paddingHorizontal: 12 },
+  benefitCopy: {
+    flex: 1,
+  },
+  benefitTitle: {
+    fontFamily: fonts.semiBold,
+    fontSize: 12,
+    lineHeight: 17,
+    color: colors.surface,
+  },
+  benefitDetail: {
+    fontFamily: fonts.regular,
+    fontSize: 11,
+    lineHeight: 16,
+    color: colors.whiteMuted,
+  },
   error: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -146,6 +306,22 @@ const styles = StyleSheet.create({
     backgroundColor: colors.coralSoft,
   },
   errorText: { ...type.caption, color: '#9B3F37', flex: 1 },
+  pagination: {
+    minHeight: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  pageDot: {
+    width: 8,
+    height: 8,
+    borderRadius: radius.pill,
+    backgroundColor: 'rgba(255,255,255,0.17)',
+  },
+  pageDotActive: {
+    backgroundColor: colors.surface,
+  },
   pressed: { opacity: 0.74, transform: [{ scale: 0.985 }] },
   disabled: { opacity: 0.65 },
 });

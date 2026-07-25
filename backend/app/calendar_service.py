@@ -33,6 +33,9 @@ class CalendarService:
         self.attempts: dict[str, CalendarAttempt] = {}
         self.client = httpx.AsyncClient(timeout=20)
 
+    async def close(self) -> None:
+        await self.client.aclose()
+
     async def status(self, user_id: str) -> dict[str, Any]:
         connection = await self.store.get_calendar_connection(user_id)
         attempts = [
@@ -91,24 +94,32 @@ class CalendarService:
             attempt.status = "failed"
             attempt.error = "Calendar permission was denied."
             return attempt
-        response = await self.client.post(
-            "https://oauth2.googleapis.com/token",
-            data={
-                "code": code,
-                "client_id": self.settings.google_client_id,
-                "client_secret": self.settings.google_client_secret,
-                "redirect_uri": self.settings.calendar_callback_url,
-                "grant_type": "authorization_code",
-            },
-        )
-        response.raise_for_status()
-        tokens = response.json()
-        identity_response = await self.client.get(
-            "https://oauth2.googleapis.com/tokeninfo",
-            params={"id_token": tokens.get("id_token", "")},
-        )
-        identity_response.raise_for_status()
-        identity = identity_response.json()
+        try:
+            response = await self.client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "code": code,
+                    "client_id": self.settings.google_client_id,
+                    "client_secret": self.settings.google_client_secret,
+                    "redirect_uri": self.settings.calendar_callback_url,
+                    "grant_type": "authorization_code",
+                },
+            )
+            response.raise_for_status()
+            tokens = response.json()
+            identity_response = await self.client.get(
+                "https://oauth2.googleapis.com/tokeninfo",
+                params={"id_token": tokens.get("id_token", "")},
+            )
+            identity_response.raise_for_status()
+            identity = identity_response.json()
+        except (httpx.HTTPError, KeyError, ValueError):
+            attempt.status = "failed"
+            attempt.error = (
+                "Google Calendar could not be connected. Check the OAuth "
+                "configuration and try again."
+            )
+            return attempt
         if attempt.user.google_sub and identity.get("sub") != attempt.user.google_sub:
             attempt.status = "failed"
             attempt.error = "Calendar account must match the signed-in Google account."

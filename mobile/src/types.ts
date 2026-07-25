@@ -1,10 +1,25 @@
 export type RunStatus =
   | 'interpreting'
   | 'awaiting_input'
+  | 'planning'
   | 'planned'
   | 'running'
+  | 'replanning'
   | 'awaiting_approval'
+  | 'paused'
   | 'completed'
+  | 'failed';
+
+export type AgentPhase =
+  | 'interpreting'
+  | 'planning'
+  | 'executing'
+  | 'replanning'
+  | 'awaiting_input'
+  | 'awaiting_approval'
+  | 'finalizing'
+  | 'completed'
+  | 'paused'
   | 'failed';
 
 export type TaskStatus =
@@ -57,6 +72,7 @@ export interface TaskNode {
   description: string;
   tool_name: string;
   dependencies: string[];
+  optional: boolean;
   status: TaskStatus;
   attempts: number;
   provider?: string;
@@ -115,7 +131,7 @@ export interface PackageOption {
   on_trip_reserve: number;
   local_transfer_reserve: number;
   total_price: number;
-  remaining_budget: number;
+  remaining_budget?: number | null;
   score: number;
 }
 
@@ -178,6 +194,8 @@ export interface RunState {
   conversation_id: string;
   user_id: string;
   status: RunStatus;
+  phase: AgentPhase;
+  harness_version: number;
   constraints: TravelConstraints;
   graph?: TaskGraph;
   flights: FlightOption[];
@@ -189,6 +207,11 @@ export interface RunState {
   calendar_event_links: string[];
   provider_calls: number;
   retries: number;
+  agent_cycles: number;
+  model_calls: number;
+  replans: number;
+  assumptions: string[];
+  last_event_id?: number;
   resilience_demo: boolean;
 }
 
@@ -206,3 +229,23 @@ export interface OperationEvent {
   timestamp: string;
 }
 
+export interface AgentEvent {
+  id: number;
+  run_id: string;
+  conversation_id: string;
+  user_id: string;
+  type: string;
+  phase: AgentPhase;
+  status: string;
+  summary: string;
+  reason?: string;
+  task_id?: string;
+  provider?: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface AgentEventPage {
+  items: AgentEvent[];
+  next_after: number;
+}

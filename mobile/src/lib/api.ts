@@ -1,4 +1,5 @@
 import type {
+  AgentEventPage,
   Approval,
   Conversation,
   ConversationSnapshot,
@@ -70,6 +71,18 @@ export const api = {
   getConversation(accessToken: string, conversationId: string) {
     return apiRequest<ConversationSnapshot>(
       `/v1/conversations/${conversationId}`,
+      accessToken,
+    );
+  },
+
+  listRunEvents(
+    accessToken: string,
+    runId: string,
+    after = 0,
+    limit = 200,
+  ) {
+    return apiRequest<AgentEventPage>(
+      `/v1/runs/${runId}/events?after=${after}&limit=${limit}`,
       accessToken,
     );
   },

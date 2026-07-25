@@ -15,10 +15,26 @@ def utc_now() -> datetime:
 class RunStatus(StrEnum):
     interpreting = "interpreting"
     awaiting_input = "awaiting_input"
+    planning = "planning"
     planned = "planned"
     running = "running"
+    replanning = "replanning"
     awaiting_approval = "awaiting_approval"
+    paused = "paused"
     completed = "completed"
+    failed = "failed"
+
+
+class AgentPhase(StrEnum):
+    interpreting = "interpreting"
+    planning = "planning"
+    executing = "executing"
+    replanning = "replanning"
+    awaiting_input = "awaiting_input"
+    awaiting_approval = "awaiting_approval"
+    finalizing = "finalizing"
+    completed = "completed"
+    paused = "paused"
     failed = "failed"
 
 
@@ -101,7 +117,6 @@ class TravelConstraints(BaseModel):
             "destination": self.destination,
             "start_date": self.start_date,
             "end_date": self.end_date,
-            "budget": self.budget,
         }
         return [key for key, value in required.items() if value is None]
 
@@ -113,6 +128,7 @@ class TaskNode(BaseModel):
     tool_name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     dependencies: list[str] = Field(default_factory=list)
+    optional: bool = False
     retry_policy: int = Field(default=2, ge=0, le=4)
     status: TaskStatus = TaskStatus.waiting
     attempts: int = 0
@@ -196,7 +212,7 @@ class PackageOption(BaseModel):
     on_trip_reserve: int
     local_transfer_reserve: int
     total_price: int
-    remaining_budget: int
+    remaining_budget: int | None = None
     score: float
     rejection_reasons: list[str] = Field(default_factory=list)
 
@@ -279,6 +295,8 @@ class RunState(BaseModel):
     conversation_id: UUID
     user_id: str
     status: RunStatus = RunStatus.interpreting
+    phase: AgentPhase = AgentPhase.interpreting
+    harness_version: int = 1
     constraints: TravelConstraints = Field(default_factory=TravelConstraints)
     graph: TaskGraph | None = None
     flights: list[FlightOption] = Field(default_factory=list)
@@ -292,6 +310,11 @@ class RunState(BaseModel):
     errors: list[str] = Field(default_factory=list)
     provider_calls: int = 0
     retries: int = 0
+    agent_cycles: int = 0
+    model_calls: int = 0
+    replans: int = 0
+    assumptions: list[str] = Field(default_factory=list)
+    last_event_id: int | None = None
     resilience_demo: bool = False
     started_at: datetime = Field(default_factory=utc_now)
     completed_at: datetime | None = None
@@ -327,6 +350,46 @@ class OperationEvent(BaseModel):
     timestamp: datetime = Field(default_factory=utc_now)
 
 
+class AgentEvent(BaseModel):
+    id: int | None = None
+    run_id: UUID
+    conversation_id: UUID
+    user_id: str
+    type: str
+    phase: AgentPhase
+    status: str
+    summary: str
+    reason: str | None = None
+    task_id: str | None = None
+    provider: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class AgentEventPage(BaseModel):
+    items: list[AgentEvent]
+    next_after: int
+
+
+class ModelCallRecord(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    run_id: UUID
+    conversation_id: UUID
+    user_id: str
+    phase: str
+    model: str
+    prompt_version: str
+    status: Literal["completed", "failed"]
+    attempts: int = 1
+    latency_ms: int
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    error_code: str | None = None
+    error_message: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class ExecutionReport(BaseModel):
     run_id: UUID
     goal: str
@@ -336,7 +399,10 @@ class ExecutionReport(BaseModel):
     itinerary: Itinerary
     calendar_event_links: list[str]
     tools_called: int
+    model_calls: int
     retries: int
+    replans: int
+    assumptions: list[str]
     rejected_packages: int
     estimated_savings: int
     elapsed_seconds: float

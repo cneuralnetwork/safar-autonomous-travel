@@ -11,6 +11,7 @@ from uuid import uuid4
 import httpx
 
 from app.config import Settings
+from app.interpreter import AIRPORTS
 from app.models import (
     FlightOption,
     FlightSegment,
@@ -691,6 +692,39 @@ class TravelToolRegistry:
 
     def provider_names(self) -> list[str]:
         return [provider.name for provider in self.providers]
+
+    async def close(self) -> None:
+        clients = [
+            provider.client
+            for provider in self.providers
+            if hasattr(provider, "client")
+        ]
+        clients.append(self.places.client)
+        await asyncio.gather(
+            *(client.aclose() for client in clients),
+            return_exceptions=True,
+        )
+
+    async def resolve_locations(
+        self,
+        constraints: TravelConstraints,
+    ) -> tuple[str, str]:
+        origin = constraints.origin_airport or AIRPORTS.get(
+            (constraints.origin or "").lower()
+        )
+        destination = constraints.destination_airport or AIRPORTS.get(
+            (constraints.destination or "").lower()
+        )
+        if not origin or not destination:
+            unresolved = []
+            if not origin:
+                unresolved.append(constraints.origin or "departure city")
+            if not destination:
+                unresolved.append(constraints.destination or "destination city")
+            raise NoResultsError(
+                "Could not safely resolve an airport for " + " and ".join(unresolved)
+            )
+        return origin, destination
 
     async def enrich_hotel_distances(
         self,

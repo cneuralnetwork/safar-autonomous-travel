@@ -1,5 +1,12 @@
 from datetime import date
+from unittest.mock import AsyncMock
 
+from app.agent_model import (
+    ModelMetrics,
+    StructuredModelResult,
+    TravelConstraintPatch,
+    TurnInterpretation,
+)
 from app.config import Settings
 from app.interpreter import RequestInterpreter
 
@@ -69,3 +76,64 @@ async def test_in_chat_constraint_relaxations_modify_the_existing_trip() -> None
     assert earlier_flights.earliest_departure is None
     assert earlier_flights.origin == "Kolkata"
     assert earlier_flights.destination == "Goa"
+
+
+async def test_sarvam_fields_merge_with_validated_next_weekend_dates() -> None:
+    interpreter = RequestInterpreter(Settings(sarvam_api_key="test-key"))
+    interpreter.agent.interpret = AsyncMock(
+        return_value=StructuredModelResult(
+            value=TurnInterpretation(
+                intent="plan_trip",
+                constraints=TravelConstraintPatch(
+                    origin="Chennai",
+                    origin_airport="DEL",
+                    destination="Jaipur",
+                    destination_airport="BOM",
+                    budget=40_000,
+                    adults=1,
+                ),
+                explicit_fields=["origin", "destination", "budget"],
+                inferred_fields=["adults"],
+                assumptions=["Assumed 1 adult traveller"],
+                assistant_message=(
+                    "I’ll plan Chennai to Jaipur next weekend within ₹40,000."
+                ),
+            ),
+            metrics=ModelMetrics(
+                phase="interpretation",
+                model="sarvam-105b",
+                prompt_version="travel-turn-v2",
+                status="completed",
+                attempts=1,
+                latency_ms=320,
+            ),
+        )
+    )
+
+    outcome = await interpreter.interpret_turn(
+        "I wanna go to Jaipur from Chennai, Budget 40000, next weekend",
+        today=date(2026, 7, 25),
+    )
+
+    assert outcome.constraints.origin == "Chennai"
+    assert outcome.constraints.origin_airport == "MAA"
+    assert outcome.constraints.destination == "Jaipur"
+    assert outcome.constraints.destination_airport == "JAI"
+    assert outcome.constraints.start_date == date(2026, 7, 31)
+    assert outcome.constraints.end_date == date(2026, 8, 2)
+    assert outcome.constraints.budget == 40_000
+    assert outcome.constraints.missing_fields == []
+    assert outcome.model_metrics is not None
+    interpreter.agent.interpret.assert_awaited_once()
+    await interpreter.gateway.close()
+
+
+async def test_budget_is_optional_when_route_and_dates_are_known() -> None:
+    interpreter = RequestInterpreter(Settings(sarvam_api_key=None))
+    constraints = await interpreter.interpret(
+        "plan a trip from Kolkata to Goa next weekend",
+        today=date(2026, 7, 25),
+    )
+
+    assert constraints.budget is None
+    assert constraints.missing_fields == []

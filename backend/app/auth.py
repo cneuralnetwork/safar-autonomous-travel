@@ -73,6 +73,9 @@ class GoogleAuthBridge:
         self.state_index: dict[str, str] = {}
         self.client = httpx.AsyncClient(timeout=20)
 
+    async def close(self) -> None:
+        await self.client.aclose()
+
     def start(self, proof_hash: str) -> GoogleAuthStartResponse:
         if not self.settings.google_auth_ready:
             raise AuthConfigurationError(

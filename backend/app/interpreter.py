@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-import json
 import re
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from dateutil import parser as date_parser
-from openai import AsyncOpenAI
 
+from app.agent_model import (
+    ModelMetrics,
+    SarvamAgent,
+    SarvamGateway,
+    TurnInterpretation,
+)
 from app.config import Settings
 from app.models import TravelConstraints
 
@@ -47,14 +52,28 @@ NUMBER_WORDS = {
 }
 
 
+@dataclass(frozen=True)
+class InterpretationOutcome:
+    constraints: TravelConstraints
+    assistant_message: str
+    quick_replies: list[str]
+    assumptions: list[str]
+    model_metrics: ModelMetrics | None = None
+
+
 class RequestInterpreter:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        gateway: SarvamGateway | None = None,
+    ) -> None:
         self.settings = settings
-        self.client = (
-            AsyncOpenAI(api_key=settings.sarvam_api_key, base_url="https://api.sarvam.ai/v1")
-            if settings.sarvam_api_key
-            else None
-        )
+        self.gateway = gateway or SarvamGateway(settings)
+        self.agent = SarvamAgent(self.gateway)
+
+    @property
+    def has_model(self) -> bool:
+        return self.gateway.enabled
 
     async def interpret(
         self,
@@ -63,52 +82,62 @@ class RequestInterpreter:
         *,
         today: date | None = None,
     ) -> TravelConstraints:
+        outcome = await self.interpret_turn(text, current, today=today)
+        return outcome.constraints
+
+    async def interpret_turn(
+        self,
+        text: str,
+        current: TravelConstraints | None = None,
+        *,
+        today: date | None = None,
+        preferences: dict[str, Any] | None = None,
+        recent_messages: list[dict[str, str]] | None = None,
+    ) -> InterpretationOutcome:
         reference_day = today or date.today()
         deterministic = self._deterministic(text, current, reference_day)
-        if current and self._is_constraint_adjustment(text):
-            return deterministic
-        if not self.client:
-            return deterministic
-        try:
-            prompt = {
-                "today": reference_day.isoformat(),
-                "existing_constraints": (current.model_dump(mode="json") if current else {}),
-                "new_user_message": text,
-                "rules": [
-                    "Only infer dates from unambiguous relative expressions.",
-                    "Do not invent an origin, destination, budget, or exact dates.",
-                    "All prices are total trip budgets in INR.",
-                    "Keep previously known values unless the new message changes them.",
-                    "missing_fields must list required fields that remain unknown.",
-                ],
-            }
-            response = await self.client.chat.completions.create(
-                model=self.settings.sarvam_model,
-                temperature=0,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Extract travel constraints. Return only data matching the provided "
-                            "JSON schema. Never include chain-of-thought."
-                        ),
-                    },
-                    {"role": "user", "content": json.dumps(prompt)},
-                ],
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "travel_constraints",
-                        "strict": True,
-                        "schema": TravelConstraints.model_json_schema(),
-                    },
-                },
+        assumptions = self._default_assumptions(text, current, deterministic)
+        if not self.has_model:
+            return InterpretationOutcome(
+                constraints=deterministic,
+                assistant_message=self._fallback_message(deterministic),
+                quick_replies=self._fallback_quick_replies(deterministic),
+                assumptions=assumptions,
             )
-            content = response.choices[0].message.content
-            parsed = TravelConstraints.model_validate_json(content or "{}")
-            return self._finalize(parsed)
-        except Exception:
-            return deterministic
+
+        result = await self.agent.interpret(
+            today=reference_day,
+            user_message=text,
+            existing_constraints=current.model_dump(mode="json") if current else {},
+            preferences=preferences or {},
+            recent_messages=recent_messages or [],
+        )
+        merged = self._merge_model_constraints(
+            text=text,
+            current=current,
+            deterministic=deterministic,
+            model=result.value,
+        )
+        combined_assumptions = list(
+            dict.fromkeys([*assumptions, *result.value.assumptions])
+        )
+        quick_replies = (
+            result.value.quick_replies
+            if merged.missing_fields
+            else []
+        )
+        if merged.missing_fields and not quick_replies:
+            quick_replies = self._fallback_quick_replies(merged)
+        return InterpretationOutcome(
+            constraints=merged,
+            assistant_message=(
+                result.value.assistant_message.strip()
+                or self._fallback_message(merged)
+            ),
+            quick_replies=quick_replies[:4],
+            assumptions=combined_assumptions[:8],
+            model_metrics=result.metrics,
+        )
 
     def _deterministic(
         self, text: str, current: TravelConstraints | None, today: date
@@ -121,6 +150,22 @@ class RequestInterpreter:
         inferred: list[str] = []
         cleaned = " ".join(text.strip().split())
         lower = cleaned.lower()
+
+        if current:
+            missing = set(current.missing_fields or current.required_missing())
+            direct_place = next(
+                (
+                    place
+                    for place in sorted(AIRPORTS, key=len, reverse=True)
+                    if lower == place
+                ),
+                None,
+            )
+            if direct_place:
+                if "origin" in missing:
+                    values["origin"] = self._clean_place(direct_place)
+                elif "destination" in missing:
+                    values["destination"] = self._clean_place(direct_place)
 
         route_patterns = [
             (
@@ -149,6 +194,28 @@ class RequestInterpreter:
             )
             if destination_only:
                 values["destination"] = self._clean_place(destination_only.group(1))
+
+        if not values.get("origin"):
+            origin_only = re.search(
+                r"\bfrom\s+([a-zA-Z ]+?)"
+                r"(?=\s+(?:for|under|below|on|next|this|with|and)\b|[,.]|$)",
+                cleaned,
+                flags=re.IGNORECASE,
+            )
+            if origin_only:
+                values["origin"] = self._clean_place(origin_only.group(1))
+
+        if not values.get("destination"):
+            destination_before_trip = next(
+                (
+                    place
+                    for place in sorted(AIRPORTS, key=len, reverse=True)
+                    if re.search(rf"\b{re.escape(place)}\s+trip\b", lower)
+                ),
+                None,
+            )
+            if destination_before_trip:
+                values["destination"] = self._clean_place(destination_before_trip)
 
         budget_increase = re.search(
             r"increase\s+(?:the\s+)?budget\s+by\s*(?:₹|rs\.?|inr)?\s*([\d,]+)",
@@ -290,18 +357,119 @@ class RequestInterpreter:
         return None
 
     def _finalize(self, constraints: TravelConstraints) -> TravelConstraints:
-        constraints.origin_airport = constraints.origin_airport or AIRPORTS.get(
+        # Airport identifiers are execution inputs, so only the controlled
+        # registry may supply them. Model-suggested codes never bypass lookup.
+        constraints.origin_airport = AIRPORTS.get(
             (constraints.origin or "").lower()
         )
-        constraints.destination_airport = constraints.destination_airport or AIRPORTS.get(
+        constraints.destination_airport = AIRPORTS.get(
             (constraints.destination or "").lower()
         )
         constraints.missing_fields = constraints.required_missing()
-        if constraints.origin and not constraints.origin_airport:
-            constraints.missing_fields.append("origin_airport")
-        if constraints.destination and not constraints.destination_airport:
-            constraints.missing_fields.append("destination_airport")
         return constraints
+
+    def _merge_model_constraints(
+        self,
+        *,
+        text: str,
+        current: TravelConstraints | None,
+        deterministic: TravelConstraints,
+        model: TurnInterpretation,
+    ) -> TravelConstraints:
+        values: dict[str, Any] = (
+            current.model_dump(mode="python", exclude={"missing_fields", "inferred_fields"})
+            if current
+            else {}
+        )
+        patch = model.constraints.model_dump(mode="python", exclude_none=True)
+        date_fields = {"start_date", "end_date"}
+        deterministic_dates_available = bool(
+            deterministic.start_date and deterministic.end_date
+        )
+        for field, value in patch.items():
+            if field in date_fields and not (
+                deterministic_dates_available
+                or (current and getattr(current, field))
+                or self._contains_explicit_date(text)
+            ):
+                continue
+            values[field] = value
+
+        deterministic_values = deterministic.model_dump(
+            mode="python",
+            exclude={"missing_fields", "inferred_fields"},
+        )
+        for field, value in deterministic_values.items():
+            current_value = getattr(current, field, None) if current else None
+            if (current is None and value is not None) or (
+                current is not None and current_value != value
+            ):
+                values[field] = value
+
+        model_preferences = list(patch.get("preferences") or [])
+        deterministic_preferences = list(deterministic.preferences)
+        values["preferences"] = list(
+            dict.fromkeys([*deterministic_preferences, *model_preferences])
+        )
+        values["inferred_fields"] = list(
+            dict.fromkeys(
+                [
+                    *deterministic.inferred_fields,
+                    *model.inferred_fields,
+                ]
+            )
+        )
+        return self._finalize(TravelConstraints.model_validate(values))
+
+    @staticmethod
+    def _contains_explicit_date(text: str) -> bool:
+        lower = text.lower()
+        return bool(
+            re.search(r"\b20\d{2}-\d{2}-\d{2}\b", lower)
+            or re.search(
+                r"\b\d{1,2}(?:st|nd|rd|th)?\s+"
+                r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|"
+                r"jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|"
+                r"nov(?:ember)?|dec(?:ember)?)\b",
+                lower,
+            )
+        )
+
+    @staticmethod
+    def _fallback_message(constraints: TravelConstraints) -> str:
+        return (
+            f"I understood a {constraints.duration_days or 'multi-day'} trip from "
+            f"{constraints.origin or 'your origin'} to "
+            f"{constraints.destination or 'your destination'}."
+        )
+
+    @staticmethod
+    def _fallback_quick_replies(constraints: TravelConstraints) -> list[str]:
+        missing = set(constraints.missing_fields)
+        if {"start_date", "end_date"} & missing:
+            return ["Next weekend", "This weekend", "I’ll give exact dates"]
+        return []
+
+    @staticmethod
+    def _default_assumptions(
+        text: str,
+        current: TravelConstraints | None,
+        constraints: TravelConstraints,
+    ) -> list[str]:
+        lower = text.lower()
+        assumptions: list[str] = []
+        if current is None and constraints.adults == 1 and not re.search(
+            r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine)\s+"
+            r"(?:people|persons|adults|travellers|travelers)\b",
+            lower,
+        ):
+            assumptions.append("Assumed 1 adult traveller")
+        if "next weekend" in lower and constraints.start_date and constraints.end_date:
+            assumptions.append(
+                "Interpreted next weekend as "
+                f"{constraints.start_date.isoformat()} to {constraints.end_date.isoformat()}"
+            )
+        return assumptions
 
     @staticmethod
     def _clean_place(value: str) -> str:

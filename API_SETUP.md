@@ -23,7 +23,8 @@ SUPABASE_SECRET_KEY=sb_secret_...
 ```
 
 The publishable key is used by the mobile client. The secret key belongs only
-on Render.
+on Render. The harness migration adds RLS-protected task/model/event tables and
+publishes run updates to Supabase Realtime; do not expose the secret key to Expo.
 
 ### 2. Google Cloud
 
@@ -76,7 +77,9 @@ SARVAM_MODEL=sarvam-105b
 ```
 
 The backend uses the OpenAI-compatible
-`https://api.sarvam.ai/v1/chat/completions` endpoint with a strict JSON schema.
+`https://api.sarvam.ai/v1/chat/completions` endpoint with strict JSON schemas
+and the `api-subscription-key` header. In production, exhausted model retries
+pause the run visibly instead of silently switching to a rule-only planner.
 
 ### 4. Travel search
 

@@ -1,9 +1,18 @@
 import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 
+from app.agent_model import (
+    AgentPlanDraft,
+    ModelMetrics,
+    PlanTaskDraft,
+    StructuredModelResult,
+    TravelConstraintPatch,
+    TurnInterpretation,
+)
 from app.calendar_service import CalendarService
 from app.config import Settings
 from app.interpreter import RequestInterpreter
@@ -27,6 +36,11 @@ async def build_orchestrator(path: Path) -> tuple[Orchestrator, UserIdentity]:
         auth_disabled=True,
         database_path=path,
         travel_provider_mode="demo",
+        sarvam_api_key=None,
+        serpapi_api_key=None,
+        google_maps_api_key=None,
+        amadeus_client_id=None,
+        amadeus_client_secret=None,
     )
     store = SQLiteStore(str(path))
     await store.initialize()
@@ -257,6 +271,118 @@ async def test_place_search_failure_keeps_the_valid_trip_and_labels_flexible_tim
         for item in day.items
     )
     assert any("Place search fallback" in error for error in run.errors)
+
+
+async def test_sarvam_controls_interpretation_and_planning_with_durable_telemetry(
+    tmp_path: Path,
+) -> None:
+    orchestrator, user = await build_orchestrator(tmp_path / "model-harness.db")
+
+    def metrics(phase: str) -> ModelMetrics:
+        return ModelMetrics(
+            phase=phase,
+            model="sarvam-105b",
+            prompt_version=f"test-{phase}-v1",
+            status="completed",
+            attempts=1,
+            latency_ms=42,
+            prompt_tokens=20,
+            completion_tokens=10,
+            total_tokens=30,
+        )
+
+    model_agent = AsyncMock()
+    model_agent.interpret.return_value = StructuredModelResult(
+        value=TurnInterpretation(
+            intent="plan_trip",
+            constraints=TravelConstraintPatch(
+                origin="Chennai",
+                destination="Jaipur",
+                budget=40_000,
+                adults=1,
+            ),
+            explicit_fields=["origin", "destination", "budget"],
+            inferred_fields=["start_date", "end_date", "adults"],
+            assumptions=["Using Friday through Sunday for next weekend."],
+            assistant_message="I have the route, weekend, and budget.",
+        ),
+        metrics=metrics("interpretation"),
+    )
+    model_agent.plan.return_value = StructuredModelResult(
+        value=AgentPlanDraft(
+            goal="Plan a Chennai to Jaipur weekend trip",
+            assumptions=[],
+            tasks=[
+                PlanTaskDraft(
+                    id="flights",
+                    title="Search current flights",
+                    description="Search round-trip flight options.",
+                    tool_name="search_flights",
+                ),
+                PlanTaskDraft(
+                    id="hotels",
+                    title="Search available stays",
+                    description="Search hotel options.",
+                    tool_name="search_hotels",
+                ),
+            ],
+        ),
+        metrics=metrics("planning"),
+    )
+    orchestrator.interpreter.gateway.api_key = "test-only"
+    orchestrator.interpreter.agent = model_agent
+    orchestrator.agent = model_agent
+
+    snapshot = await orchestrator.create_conversation(
+        user,
+        "I wanna go to Jaipur from Chennai, budget 40000, next weekend",
+        False,
+    )
+    await wait_for_status(
+        orchestrator,
+        user,
+        snapshot.conversation.id,
+        RunStatus.awaiting_approval,
+    )
+    run = (await orchestrator.snapshot(user, snapshot.conversation.id)).active_run
+
+    assert run is not None
+    assert run.harness_version == 2
+    assert run.model_calls == 2
+    assert run.agent_cycles == 2
+    assert run.constraints.origin == "Chennai"
+    assert run.constraints.destination == "Jaipur"
+    assert run.graph is not None
+    assert run.graph.goal == "Plan a Chennai to Jaipur weekend trip"
+    assert model_agent.interpret.await_count == 1
+    assert model_agent.plan.await_count == 1
+
+    calls = await orchestrator.store.list_model_calls(run.id, user.id)
+    events = await orchestrator.store.list_events(run.id, user.id)
+    assert [call.phase for call in calls] == ["interpretation", "planning"]
+    assert {"model_completed", "plan_created", "approval_required"} <= {
+        event.type for event in events
+    }
+
+
+async def test_replan_retries_inside_one_run_lease(tmp_path: Path) -> None:
+    orchestrator, user = await build_orchestrator(tmp_path / "lease-loop.db")
+    run_id = uuid4()
+    orchestrator.store.claim_run = AsyncMock(return_value=True)
+    orchestrator.store.release_run = AsyncMock(return_value=None)
+    orchestrator._execute = AsyncMock(side_effect=[True, False])
+
+    await orchestrator._execute_claimed(run_id, user)
+
+    assert orchestrator._execute.await_count == 2
+    orchestrator.store.claim_run.assert_awaited_once_with(
+        run_id,
+        orchestrator.worker_id,
+    )
+    orchestrator.store.release_run.assert_awaited_once_with(
+        run_id,
+        orchestrator.worker_id,
+    )
 
 
 class EmptyTravelProvider:

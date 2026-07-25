@@ -20,6 +20,8 @@ The repository contains:
 - Search and planning are safe; calendar writes always require approval.
 - The LLM interprets intent, while deterministic code enforces constraints.
 - Every task, retry, fallback, rejection, and external action is recorded.
+- Sarvam plans and replans through strict schemas; it cannot invent or execute
+  tools outside Safar's registry.
 - Past trips and reusable preferences are persisted per Google account.
 - Interrupted planned/running workflows resume from persisted state after a
   service restart; Calendar writes never resume without approval.
@@ -62,12 +64,12 @@ steps, redirect URLs, scopes, and environment variables.
 
 ```text
 Expo mobile app
-    │  HTTPS + polling
+    │  HTTPS + Supabase Realtime
     ▼
 FastAPI API ── OAuth bridge ── Google / Supabase Auth
     │
-    ├── request interpreter (Sarvam-105B)
-    ├── validated task graph
+    ├── Sarvam controller (interpret, plan, replan)
+    ├── normalized, validated task graph
     ├── parallel travel tools
     ├── deterministic constraint solver
     ├── retry + fallback policy
@@ -75,8 +77,14 @@ FastAPI API ── OAuth bridge ── Google / Supabase Auth
     └── approval gate ───────── Google Calendar
     │
     ▼
-Supabase Postgres + RLS
+Supabase Postgres + RLS + append-only events
 ```
+
+The live UI subscribes to run, message, and agent-event changes. A cursor-based
+`GET /v1/runs/{run_id}/events` catch-up endpoint and a low-frequency REST
+snapshot reconcile missed subscriptions without turning the app into a polling
+loop. Run leases prevent duplicate workers from executing the same persisted
+graph after a service restart.
 
 ## Verification
 
@@ -84,6 +92,9 @@ Supabase Postgres + RLS
 cd backend
 uv run pytest
 uv run ruff check .
+
+# Uses local SARVAM_API_KEY and prints sanitized telemetry only.
+uv run python scripts/smoke_sarvam.py
 
 cd ../mobile
 npm run typecheck

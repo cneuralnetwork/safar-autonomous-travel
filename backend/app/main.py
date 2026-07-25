@@ -9,6 +9,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Res
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
+from app.agent_model import SarvamGateway
 from app.auth import (
     AuthConfigurationError,
     GoogleAuthBridge,
@@ -20,6 +21,7 @@ from app.calendar_service import CalendarService
 from app.config import Settings, get_settings
 from app.interpreter import RequestInterpreter
 from app.models import (
+    AgentEventPage,
     ApprovalDecision,
     Conversation,
     ConversationSnapshot,
@@ -41,22 +43,33 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     if settings.production and settings.auth_disabled:
         raise RuntimeError("AUTH_DISABLED cannot be enabled in production")
+    if settings.production and not settings.sarvam_api_key:
+        raise RuntimeError("SARVAM_API_KEY is required in production")
     store = create_store(settings)
     await store.initialize()
+    sarvam_gateway = SarvamGateway(settings)
     cipher = TokenCipher(settings.token_encryption_key)
     calendar = CalendarService(settings, store, cipher)
     app.state.settings = settings
     app.state.store = store
     app.state.auth_bridge = GoogleAuthBridge(settings)
     app.state.calendar = calendar
+    app.state.sarvam_gateway = sarvam_gateway
     app.state.orchestrator = Orchestrator(
         store,
-        RequestInterpreter(settings),
+        RequestInterpreter(settings, sarvam_gateway),
         TravelToolRegistry(settings),
         calendar,
     )
     await app.state.orchestrator.recover_pending_runs()
-    yield
+    try:
+        yield
+    finally:
+        await app.state.orchestrator.close()
+        await app.state.auth_bridge.close()
+        await calendar.close()
+        await sarvam_gateway.close()
+        await store.close()
 
 
 app = FastAPI(
@@ -106,6 +119,8 @@ async def health(request: Request) -> dict[str, object]:
         "storage": "supabase" if app_settings.has_supabase else "sqlite",
         "travel_providers": tools.provider_names(),
         "sarvam": bool(app_settings.sarvam_api_key),
+        "sarvam_model": app_settings.sarvam_model,
+        "agent_harness": "v2",
         "google_auth": app_settings.google_auth_ready,
         "calendar": bool(app_settings.google_client_id and app_settings.google_client_secret),
     }
@@ -261,6 +276,33 @@ async def get_report(
         raise HTTPException(status_code=404, detail=str(error)) from error
 
 
+@app.get(
+    "/v1/runs/{run_id}/events",
+    response_model=AgentEventPage,
+    tags=["runs"],
+)
+async def list_run_events(
+    run_id: UUID,
+    request: Request,
+    user: AuthenticatedUser,
+    after: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> AgentEventPage:
+    run = await request.app.state.store.get_run(run_id, user.id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    items = await request.app.state.store.list_events(
+        run_id,
+        user.id,
+        after_id=after,
+        limit=limit,
+    )
+    return AgentEventPage(
+        items=items,
+        next_after=items[-1].id if items and items[-1].id is not None else after,
+    )
+
+
 @app.post("/v1/calendar/connect", tags=["calendar"])
 async def connect_calendar(
     request: Request,
@@ -316,7 +358,8 @@ async def disconnect_calendar(
 
 
 def _oauth_result_page(title: str, message: str, success: bool) -> HTMLResponse:
-    accent = "#139FDB" if success else "#E96A5D"
+    accent = "#49A676" if success else "#EF4456"
+    accent_soft = "#E8F5EF" if success else "#FFF0F2"
     icon = "✓" if success else "!"
     return HTMLResponse(
         f"""
@@ -326,17 +369,137 @@ def _oauth_result_page(title: str, message: str, success: bool) -> HTMLResponse:
             <meta charset="utf-8" />
             <meta name="viewport" content="width=device-width, initial-scale=1" />
             <title>{escape(title)} · Safar</title>
+            <style>
+              * {{ box-sizing: border-box; }}
+              body {{
+                margin: 0;
+                min-height: 100svh;
+                display: grid;
+                place-items: center;
+                padding: 24px;
+                overflow: hidden;
+                color: #11184c;
+                background:
+                  radial-gradient(circle at 18% 12%, #ffffff 0 7%, transparent 32%),
+                  linear-gradient(160deg, #fafafd 0%, #efebfc 55%, #dcd7f7 100%);
+                font-family: Poppins, ui-rounded, "Avenir Next", sans-serif;
+              }}
+              body::before, body::after {{
+                content: "";
+                position: fixed;
+                z-index: -1;
+                width: 360px;
+                height: 360px;
+                border-radius: 50%;
+                filter: blur(2px);
+              }}
+              body::before {{
+                left: -210px;
+                bottom: -190px;
+                background: #4c3dd4;
+                opacity: .18;
+              }}
+              body::after {{
+                right: -230px;
+                top: -210px;
+                background: #11184c;
+                opacity: .08;
+              }}
+              main {{
+                width: min(390px, 100%);
+                overflow: hidden;
+                border: 1px solid #e9e8f0;
+                border-radius: 24px;
+                background: #ffffff;
+                box-shadow: 0 18px 48px rgba(17, 24, 76, .13);
+              }}
+              .brand {{
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                padding: 18px 20px;
+                border-bottom: 1px solid #e9e8f0;
+                font-size: 16px;
+                font-weight: 700;
+              }}
+              .brand-mark {{
+                display: grid;
+                place-items: center;
+                width: 36px;
+                height: 36px;
+                border-radius: 12px;
+                color: #ffffff;
+                background: linear-gradient(135deg, #4c3dd4, #574ad6);
+                transform: rotate(-8deg);
+              }}
+              .content {{ padding: 28px 24px 30px; }}
+              .result-icon {{
+                display: grid;
+                place-items: center;
+                width: 54px;
+                height: 54px;
+                border: 1px solid {accent};
+                border-radius: 18px;
+                color: {accent};
+                background: {accent_soft};
+                font-size: 25px;
+                font-weight: 700;
+              }}
+              h1 {{
+                margin: 20px 0 8px;
+                font-size: 25px;
+                line-height: 1.2;
+                letter-spacing: -.5px;
+              }}
+              p {{
+                margin: 0;
+                color: #686b8d;
+                font-size: 14px;
+                line-height: 1.65;
+              }}
+              .hint {{
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin-top: 22px;
+                padding: 12px 13px;
+                border-radius: 13px;
+                color: #1d2258;
+                background: #f5f2fc;
+                font-size: 12px;
+                line-height: 1.45;
+              }}
+              .hint-dot {{
+                width: 8px;
+                height: 8px;
+                flex: 0 0 auto;
+                border-radius: 50%;
+                background: #4c3dd4;
+              }}
+              @media (prefers-reduced-motion: no-preference) {{
+                main {{ animation: arrive .42s cubic-bezier(.2,.8,.2,1) both; }}
+                @keyframes arrive {{
+                  from {{ opacity: 0; transform: translateY(12px) scale(.985); }}
+                  to {{ opacity: 1; transform: translateY(0) scale(1); }}
+                }}
+              }}
+            </style>
           </head>
-          <body style="margin:0;background:#efefed;font-family:-apple-system,BlinkMacSystemFont,
-                       'Segoe UI',sans-serif;color:#17181a;display:grid;place-items:center;
-                       min-height:100vh">
-            <main style="width:min(360px,calc(100% - 40px));background:#fff;border-radius:28px;
-                         padding:32px;box-sizing:border-box;box-shadow:0 12px 40px #00000012">
-              <div style="width:52px;height:52px;border-radius:18px;background:{accent};
-                          color:white;display:grid;place-items:center;font-size:28px;
-                          font-weight:800">{icon}</div>
-              <h1 style="font-size:28px;line-height:1.1;margin:24px 0 10px">{escape(title)}</h1>
-              <p style="font-size:16px;line-height:1.5;color:#6f7377;margin:0">{message}</p>
+          <body>
+            <main>
+              <div class="brand">
+                <span class="brand-mark" aria-hidden="true">✈</span>
+                <span>Safar</span>
+              </div>
+              <div class="content">
+                <div class="result-icon" aria-hidden="true">{icon}</div>
+                <h1>{escape(title)}</h1>
+                <p>{message}</p>
+                <div class="hint">
+                  <span class="hint-dot" aria-hidden="true"></span>
+                  <span>You can safely close this window and continue in Safar.</span>
+                </div>
+              </div>
             </main>
           </body>
         </html>

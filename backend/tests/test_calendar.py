@@ -97,3 +97,43 @@ async def test_calendar_permission_denial_is_immediately_observable(tmp_path) ->
         "authorization_status": "failed",
         "error": "Calendar permission was denied.",
     }
+
+
+async def test_calendar_token_exchange_failure_is_immediately_observable(
+    tmp_path,
+) -> None:
+    store = SQLiteStore(str(tmp_path / "calendar-token-failure.db"))
+    await store.initialize()
+    service = CalendarService(
+        Settings(
+            google_client_id="client-id",
+            google_client_secret="client-secret",
+            public_base_url="https://safar.example",
+        ),
+        store,
+        TokenCipher(None),
+    )
+    user = UserIdentity(
+        id="user-1",
+        email="traveller@example.com",
+        google_sub="google-subject",
+    )
+    connection = service.start(user)
+    state = parse_qs(urlparse(connection["authorization_url"]).query)["state"][0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            request=request,
+            json={"error": "invalid_grant"},
+        )
+
+    await service.client.aclose()
+    service.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    attempt = await service.callback(state, "invalid-code", None)
+    status = await service.status(user.id)
+    await service.client.aclose()
+
+    assert attempt.status == "failed"
+    assert status["authorization_status"] == "failed"
+    assert "OAuth configuration" in str(status["error"])

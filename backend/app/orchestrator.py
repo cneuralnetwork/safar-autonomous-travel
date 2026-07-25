@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
+import socket
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -9,10 +11,13 @@ from uuid import UUID
 
 import httpx
 
+from app.agent_model import ModelMetrics, ReplanDecision, SarvamModelError
 from app.calendar_service import CalendarService
 from app.interpreter import RequestInterpreter
 from app.itinerary import create_itinerary
 from app.models import (
+    AgentEvent,
+    AgentPhase,
     ApprovalDecision,
     ApprovalPayload,
     ChatMessage,
@@ -20,6 +25,7 @@ from app.models import (
     ConversationSnapshot,
     ExecutionReport,
     MessageKind,
+    ModelCallRecord,
     OperationEvent,
     RunState,
     RunStatus,
@@ -56,9 +62,18 @@ class Orchestrator:
     ) -> None:
         self.store = store
         self.interpreter = interpreter
+        self.agent = interpreter.agent
         self.tools = tools
         self.calendar = calendar
+        self.worker_id = f"{socket.gethostname()}:{os.getpid()}"
         self.background_tasks: set[asyncio.Task[Any]] = set()
+
+    async def close(self) -> None:
+        for task in self.background_tasks:
+            task.cancel()
+        if self.background_tasks:
+            await asyncio.gather(*self.background_tasks, return_exceptions=True)
+        await self.tools.close()
 
     async def recover_pending_runs(self) -> int:
         recovered = 0
@@ -76,6 +91,7 @@ class Orchestrator:
                 task.started_at = None
                 task.completed_at = None
             run.status = RunStatus.planned
+            run.phase = AgentPhase.executing
             run.flights = []
             run.hotels = []
             run.places = []
@@ -84,6 +100,7 @@ class Orchestrator:
             run.itinerary = None
             run.approval = None
             await self.store.save_run(run)
+            await self._persist_graph(run)
             event = OperationEvent(
                 task_id="workflow_recovery",
                 status=TaskStatus.retrying,
@@ -162,12 +179,14 @@ class Orchestrator:
             else None
         )
         memory_applied = False
-        if base_constraints is None and "usual preference" in request.text.lower():
-            preferences = await self.store.get_user_preferences(user.id)
-            if preferences:
-                base_constraints = self._constraints_from_preferences(preferences)
-                memory_applied = True
-        constraints = await self.interpreter.interpret(request.text, base_constraints)
+        saved_preferences = await self.store.get_user_preferences(user.id)
+        if (
+            base_constraints is None
+            and "usual preference" in request.text.lower()
+            and saved_preferences
+        ):
+            base_constraints = self._constraints_from_preferences(saved_preferences)
+            memory_applied = True
         run = (
             current_run
             if (
@@ -178,14 +197,68 @@ class Orchestrator:
             else RunState(
                 conversation_id=conversation_id,
                 user_id=user.id,
+                harness_version=2,
                 resilience_demo=bool(request.resilience_demo),
             )
         )
-        run.constraints = constraints
         run.status = RunStatus.interpreting
+        run.phase = AgentPhase.interpreting
         await self.store.save_run(run)
         user_message.run_id = run.id
         await self.store.update_message_run_id(user_message.id, run.id, user.id)
+        await self._event(
+            run,
+            event_type="model_started" if self.interpreter.has_model else "interpreter_started",
+            status="running",
+            summary=(
+                "Sarvam is interpreting your trip request."
+                if self.interpreter.has_model
+                else "The local interpreter is validating your trip request."
+            ),
+            payload={"model": self.interpreter.settings.sarvam_model},
+        )
+
+        recent_messages = await self.store.list_messages(conversation_id, user.id)
+        try:
+            interpretation = await self.interpreter.interpret_turn(
+                request.text,
+                base_constraints,
+                preferences=(
+                    saved_preferences.model_dump(mode="json")
+                    if saved_preferences
+                    else {}
+                ),
+                recent_messages=[
+                    {"role": message.role, "content": message.text}
+                    for message in recent_messages[-12:]
+                    if message.role in {"user", "assistant"}
+                ],
+            )
+        except SarvamModelError as error:
+            await self._record_model_call(run, error.metrics)
+            run.status = RunStatus.paused
+            run.phase = AgentPhase.paused
+            run.errors.append(str(error))
+            await self.store.save_run(run)
+            await self._message(
+                run,
+                MessageKind.error,
+                (
+                    "Sarvam could not interpret this request after automatic retries. "
+                    "Try again shortly."
+                ),
+                {"error_code": error.metrics.error_code, "recoverable": True},
+            )
+            return run
+
+        if interpretation.model_metrics:
+            await self._record_model_call(run, interpretation.model_metrics)
+        constraints = interpretation.constraints
+        run.constraints = constraints
+        run.assumptions = list(
+            dict.fromkeys([*run.assumptions, *interpretation.assumptions])
+        )
+        await self.store.save_run(run)
         conversation.last_message = request.text
         conversation.updated_at = utc_now()
         if constraints.destination:
@@ -196,32 +269,88 @@ class Orchestrator:
         await self._message(
             run,
             MessageKind.interpretation,
-            (
-                f"I understood a {constraints.duration_days or 'multi-day'} trip from "
-                f"{constraints.origin or 'your origin'} to "
-                f"{constraints.destination or 'your destination'}."
-            ),
+            interpretation.assistant_message,
             {
                 "constraints": constraints.model_dump(mode="json"),
                 "missing_fields": constraints.missing_fields,
                 "memory_applied": memory_applied,
+                "assumptions": interpretation.assumptions,
+                "model": (
+                    interpretation.model_metrics.model
+                    if interpretation.model_metrics
+                    else None
+                ),
             },
         )
         if constraints.missing_fields:
             run.status = RunStatus.awaiting_input
+            run.phase = AgentPhase.awaiting_input
             await self.store.save_run(run)
             await self._message(
                 run,
                 MessageKind.clarification,
                 self._clarification(constraints),
-                {"quick_replies": self._quick_replies(constraints)},
+                {
+                    "quick_replies": (
+                        interpretation.quick_replies
+                        or self._quick_replies(constraints)
+                    )
+                },
             )
             return run
 
         await self._remember_preferences(user.id, constraints)
-        run.graph = build_task_graph(constraints)
-        run.status = RunStatus.planned
+        run.status = RunStatus.planning
+        run.phase = AgentPhase.planning
         await self.store.save_run(run)
+        await self._event(
+            run,
+            event_type="model_started" if self.interpreter.has_model else "planner_started",
+            status="running",
+            summary=(
+                "Sarvam is creating the execution graph."
+                if self.interpreter.has_model
+                else "The safe planner is creating the execution graph."
+            ),
+        )
+        try:
+            if self.interpreter.has_model:
+                planned = await self.agent.plan(
+                    constraints=constraints.model_dump(mode="json"),
+                    assumptions=run.assumptions,
+                )
+                await self._record_model_call(run, planned.metrics)
+                run.assumptions = list(
+                    dict.fromkeys([*run.assumptions, *planned.value.assumptions])
+                )
+                run.graph = build_task_graph(constraints, planned.value)
+            else:
+                run.graph = build_task_graph(constraints)
+        except SarvamModelError as error:
+            await self._record_model_call(run, error.metrics)
+            run.status = RunStatus.paused
+            run.phase = AgentPhase.paused
+            run.errors.append(str(error))
+            await self.store.save_run(run)
+            await self._message(
+                run,
+                MessageKind.error,
+                "Sarvam could not produce a valid execution plan after automatic retries.",
+                {"error_code": error.metrics.error_code, "recoverable": True},
+            )
+            return run
+
+        run.status = RunStatus.planned
+        run.phase = AgentPhase.executing
+        await self.store.save_run(run)
+        await self._persist_graph(run)
+        await self._event(
+            run,
+            event_type="plan_created",
+            status="completed",
+            summary=f"Created a validated {run.graph.estimated_steps}-step task graph.",
+            payload={"graph": run.graph.model_dump(mode="json")},
+        )
         await self._message(
             run,
             MessageKind.task_graph,
@@ -232,24 +361,65 @@ class Orchestrator:
         return run
 
     def _schedule_execution(self, run_id: UUID, user: UserIdentity) -> None:
-        task = asyncio.create_task(self._execute(run_id, user))
+        task = asyncio.create_task(self._execute_claimed(run_id, user))
         self.background_tasks.add(task)
         task.add_done_callback(self.background_tasks.discard)
 
-    async def _execute(self, run_id: UUID, user: UserIdentity) -> None:
+    async def _execute_claimed(self, run_id: UUID, user: UserIdentity) -> None:
+        if not await self.store.claim_run(run_id, self.worker_id):
+            return
+        heartbeat = asyncio.create_task(self._lease_heartbeat(run_id))
+        try:
+            should_retry = True
+            while should_retry:
+                should_retry = await self._execute(run_id, user)
+        finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+            await self.store.release_run(run_id, self.worker_id)
+
+    async def _lease_heartbeat(self, run_id: UUID) -> None:
+        while True:
+            await asyncio.sleep(45)
+            if not await self.store.claim_run(run_id, self.worker_id):
+                return
+
+    async def _execute(self, run_id: UUID, user: UserIdentity) -> bool:
         run = await self.store.get_run(run_id, user.id)
         if not run or not run.graph:
-            return
+            return False
         run.status = RunStatus.running
+        run.phase = AgentPhase.executing
         await self.store.save_run(run)
         try:
+            location_task = self._task_or_none(run, "resolve_locations")
+            if location_task and location_task.status != TaskStatus.completed:
+                await self._start_task(run, location_task)
+                origin_airport, destination_airport = await self.tools.resolve_locations(
+                    run.constraints
+                )
+                run.constraints.origin_airport = origin_airport
+                run.constraints.destination_airport = destination_airport
+                run.graph.constraints = run.constraints
+                await self._complete_task(
+                    run,
+                    location_task,
+                    f"Resolved {origin_airport} → {destination_airport}",
+                    "Airport identifiers were resolved by the controlled location registry",
+                )
+
             flights_task = asyncio.create_task(
                 self._run_search_task(run, "flight_search", "search_flights")
             )
             hotels_task = asyncio.create_task(
                 self._run_search_task(run, "hotel_search", "search_hotels")
             )
-            run.flights, run.hotels = await asyncio.gather(flights_task, hotels_task)
+            places_task = asyncio.create_task(self._run_places_task(run))
+            run.flights, run.hotels, run.places = await asyncio.gather(
+                flights_task,
+                hotels_task,
+                places_task,
+            )
             await self.store.save_run(run)
             await self._message(
                 run,
@@ -268,12 +438,27 @@ class Orchestrator:
             await self._start_task(run, compare_task)
             solver_result = compare_packages(run.flights, run.hotels, run.constraints)
             if not solver_result.valid:
-                reason = self._impossible_budget_message(run.constraints, solver_result)
+                fallback_reason = self._impossible_budget_message(
+                    run.constraints,
+                    solver_result,
+                )
+                decision = await self._model_replan(
+                    run,
+                    failure={
+                        "kind": "no_valid_package",
+                        "task_id": compare_task.id,
+                        "rejection_summary": solver_result.rejection_summary,
+                    },
+                    fallback_message=fallback_reason,
+                )
+                reason = decision.user_message if decision else fallback_reason
                 compare_task.status = TaskStatus.failed
                 compare_task.summary = "No valid package satisfies every hard constraint"
                 compare_task.reason = reason
                 compare_task.completed_at = utc_now()
                 run.status = RunStatus.awaiting_input
+                run.phase = AgentPhase.awaiting_input
+                await self.store.save_task(run, compare_task)
                 await self.store.save_run(run)
                 await self._message(
                     run,
@@ -281,14 +466,20 @@ class Orchestrator:
                     reason,
                     {
                         "quick_replies": [
-                            "Increase the budget by ₹5,000",
-                            "Show hotels a little farther away",
-                            "Allow earlier flights",
-                        ],
+                            *(
+                                decision.quick_replies
+                                if decision and decision.quick_replies
+                                else [
+                                    "Increase the budget by ₹5,000",
+                                    "Show hotels a little farther away",
+                                    "Allow earlier flights",
+                                ]
+                            )
+                        ][:4],
                         "rejections": solver_result.rejection_summary,
                     },
                 )
-                return
+                return False
             run.packages = solver_result.valid
             run.selected_package = solver_result.valid[0]
             await self._complete_task(
@@ -304,8 +495,15 @@ class Orchestrator:
                 run,
                 MessageKind.budget,
                 (
-                    f"The best valid package is ₹{run.selected_package.total_price:,}, "
-                    f"leaving ₹{run.selected_package.remaining_budget:,}."
+                    (
+                        f"The best valid package is ₹{run.selected_package.total_price:,}, "
+                        f"leaving ₹{run.selected_package.remaining_budget:,}."
+                    )
+                    if run.selected_package.remaining_budget is not None
+                    else (
+                        f"The best-ranked package is "
+                        f"₹{run.selected_package.total_price:,}."
+                    )
                 ),
                 {
                     "selected_package": run.selected_package.model_dump(mode="json"),
@@ -316,30 +514,6 @@ class Orchestrator:
                     "rejection_summary": solver_result.rejection_summary,
                 },
             )
-
-            places_task = self._task(run, "place_search")
-            await self._start_task(run, places_task)
-            try:
-                run.places = await self._retry_single(
-                    run,
-                    places_task,
-                    "google_places",
-                    lambda: self.tools.places.search(run.constraints),
-                )
-                await self._complete_task(
-                    run,
-                    places_task,
-                    f"Found {len(run.places)} itinerary candidates",
-                    "Selected well-rated activities with usable location data",
-                )
-            except (ToolError, httpx.HTTPError) as error:
-                run.errors.append(f"Place search fallback: {error}")
-                await self._complete_task(
-                    run,
-                    places_task,
-                    "Place search was unavailable; continuing with flexible time blocks",
-                    "The flight and hotel plan is still valid; no place data was invented",
-                )
 
             itinerary_task = self._task(run, "create_itinerary")
             await self._start_task(run, itinerary_task)
@@ -373,43 +547,111 @@ class Orchestrator:
                 expires_at=datetime.now(UTC) + timedelta(hours=24),
             )
             run.status = RunStatus.awaiting_approval
+            run.phase = AgentPhase.awaiting_approval
+            await self.store.save_task(run, approval_task)
             await self.store.save_run(run)
+            await self._event(
+                run,
+                event_type="approval_required",
+                status="awaiting_approval",
+                summary=f"Waiting for approval to add {event_count} Calendar events.",
+                task_id=approval_task.id,
+                payload={"approval": run.approval.model_dump(mode="json")},
+            )
             await self._message(
                 run,
                 MessageKind.approval,
                 f"Ready to add {event_count} events to Google Calendar.",
                 {"approval": run.approval.model_dump(mode="json")},
             )
+            return False
         except ToolError as error:
-            run.errors.append(str(error))
+            error_message = self._safe_external_error(error)
+            run.errors.append(error_message)
+            decision = await self._model_replan(
+                run,
+                failure={
+                    "kind": "travel_provider_failure",
+                    "error": error_message,
+                },
+                fallback_message=(
+                    "The travel providers could not return a complete set of options "
+                    "after retries and fallbacks. Change a constraint and I’ll try again."
+                ),
+            )
+            if (
+                decision
+                and decision.action in {"retry", "switch_provider"}
+                and run.replans <= 3
+            ):
+                for task_id in ("flight_search", "hotel_search"):
+                    task = self._task_or_none(run, task_id)
+                    if task:
+                        task.status = TaskStatus.waiting
+                        task.reason = None
+                        task.completed_at = None
+                        await self.store.save_task(run, task)
+                run.status = RunStatus.planned
+                run.phase = AgentPhase.executing
+                await self.store.save_run(run)
+                await self._event(
+                    run,
+                    event_type="replan_applied",
+                    status="completed",
+                    summary=decision.explanation,
+                    payload={"action": decision.action},
+                )
+                return True
+
             run.status = RunStatus.awaiting_input
+            run.phase = AgentPhase.awaiting_input
             await self.store.save_run(run)
             await self._message(
                 run,
                 MessageKind.clarification,
                 (
-                    "The travel providers could not return a complete set of options "
-                    "after retries and fallbacks. Change a constraint and I’ll try again."
+                    decision.user_message
+                    if decision
+                    else (
+                        "The travel providers could not return a complete set of options "
+                        "after retries and fallbacks. Change a constraint and I’ll try again."
+                    )
                 ),
                 {
-                    "quick_replies": [
-                        "Allow earlier flights",
-                        "Show hotels a little farther away",
-                        "I’ll give different dates",
-                    ],
-                    "error": str(error),
+                    "quick_replies": (
+                        decision.quick_replies
+                        if decision and decision.quick_replies
+                        else [
+                            "Allow earlier flights",
+                            "Show hotels a little farther away",
+                            "I’ll give different dates",
+                        ]
+                    ),
+                    "error": error_message,
                 },
             )
+            return False
         except Exception as error:
-            run.errors.append(str(error))
+            error_code = type(error).__name__
+            run.errors.append(f"Unexpected internal error: {error_code}")
             run.status = RunStatus.failed
+            run.phase = AgentPhase.failed
             await self.store.save_run(run)
+            await self._event(
+                run,
+                event_type="run_failed",
+                status="failed",
+                summary="The agent run stopped safely.",
+                reason="An unexpected internal error occurred.",
+                payload={"error_code": error_code},
+            )
             await self._message(
                 run,
                 MessageKind.error,
                 "I could not finish this run safely.",
-                {"error": str(error), "recoverable": isinstance(error, ToolError)},
+                {"error_code": error_code, "recoverable": False},
             )
+            return False
 
     async def approve(
         self, user: UserIdentity, run_id: UUID, decision: ApprovalDecision
@@ -429,6 +671,7 @@ class Orchestrator:
             approval_task.summary = "User cancelled Calendar creation"
             self._task(run, "add_calendar").status = TaskStatus.skipped
             run.status = RunStatus.completed
+            run.phase = AgentPhase.completed
             run.completed_at = utc_now()
             await self.store.save_run(run)
             await self._message(
@@ -444,6 +687,7 @@ class Orchestrator:
                 raise ValueError("Describe the requested change")
             approval_task.status = TaskStatus.skipped
             run.status = RunStatus.completed
+            run.phase = AgentPhase.completed
             run.completed_at = utc_now()
             await self.store.save_run(run)
             return await self.handle_message(
@@ -475,6 +719,7 @@ class Orchestrator:
             "Only the approved itinerary payload was written",
         )
         run.status = RunStatus.completed
+        run.phase = AgentPhase.finalizing
         run.completed_at = utc_now()
         await self.store.save_run(run)
         await self._message(
@@ -484,6 +729,8 @@ class Orchestrator:
             {"links": run.calendar_event_links},
         )
         await self._finalize_report(run)
+        run.phase = AgentPhase.completed
+        await self.store.save_run(run)
         return run
 
     async def report(self, user: UserIdentity, run_id: UUID) -> ExecutionReport:
@@ -506,13 +753,61 @@ class Orchestrator:
             itinerary=run.itinerary,
             calendar_event_links=run.calendar_event_links,
             tools_called=run.provider_calls,
+            model_calls=run.model_calls,
             retries=run.retries,
+            replans=run.replans,
+            assumptions=run.assumptions,
             rejected_packages=max(0, len(run.flights) * len(run.hotels) - len(run.packages)),
             estimated_savings=max(prices) - run.selected_package.total_price if prices else 0,
             elapsed_seconds=round(
                 ((run.completed_at or utc_now()) - run.started_at).total_seconds(), 2
             ),
         )
+
+    async def _run_places_task(self, run: RunState) -> list[Any]:
+        task = self._task_or_none(run, "place_search")
+        if not task:
+            return []
+        await self._start_task(run, task)
+        try:
+            places = await self._retry_single(
+                run,
+                task,
+                "google_places",
+                lambda: self.tools.places.search(run.constraints),
+            )
+            await self._complete_task(
+                run,
+                task,
+                f"Found {len(places)} itinerary candidates",
+                "Selected well-rated activities with usable location data",
+            )
+            return places
+        except (ToolError, httpx.HTTPError) as error:
+            error_message = self._safe_external_error(error)
+            run.errors.append(f"Place search fallback: {error_message}")
+            decision = await self._model_replan(
+                run,
+                failure={
+                    "kind": "optional_place_search_failure",
+                    "task_id": task.id,
+                    "error": error_message,
+                },
+                fallback_message=(
+                    "Place search was unavailable, so I’ll preserve flexible time near the hotel."
+                ),
+            )
+            await self._complete_task(
+                run,
+                task,
+                (
+                    decision.user_message
+                    if decision
+                    else "Place search was unavailable; continuing with flexible time blocks"
+                ),
+                "The flight and hotel plan remains valid; no place data was invented",
+            )
+            return []
 
     async def _run_search_task(self, run: RunState, task_id: str, method_name: str) -> list[Any]:
         task = self._task(run, task_id)
@@ -556,37 +851,42 @@ class Orchestrator:
                     httpx.TimeoutException,
                     httpx.NetworkError,
                 ) as error:
-                    errors.append(f"{provider.name}: {error}")
+                    error_message = self._safe_external_error(error)
+                    errors.append(f"{provider.name}: {error_message}")
                     if attempt < task.retry_policy:
                         run.retries += 1
                         task.status = TaskStatus.retrying
-                        task.reason = str(error)
+                        task.reason = error_message
+                        await self.store.save_task(run, task)
                         await self.store.save_run(run)
                         await self._operation(
                             run,
                             task,
-                            f"{provider.name} failed: {error}. Retrying.",
+                            f"{provider.name} failed: {error_message}. Retrying.",
                             "Temporary network/provider error",
                         )
                         await asyncio.sleep(0.25 * (attempt + 1))
                         continue
                     break
                 except (NoResultsError, ToolError, httpx.HTTPStatusError) as error:
-                    errors.append(f"{provider.name}: {error}")
+                    error_message = self._safe_external_error(error)
+                    errors.append(f"{provider.name}: {error_message}")
                     await self._operation(
                         run,
                         task,
                         f"{provider.name} could not provide options. Switching provider.",
-                        str(error),
+                        error_message,
                     )
                     break
             if provider_index < len(self.tools.providers) - 1:
                 run.retries += 1
                 task.status = TaskStatus.retrying
+                await self.store.save_task(run, task)
                 await self.store.save_run(run)
         task.status = TaskStatus.failed
         task.reason = "; ".join(errors)
         task.completed_at = utc_now()
+        await self.store.save_task(run, task)
         await self.store.save_run(run)
         raise ToolError(task.reason or f"{task_id} failed")
 
@@ -612,7 +912,15 @@ class Orchestrator:
                     raise
                 run.retries += 1
                 task.status = TaskStatus.retrying
-                await self._operation(run, task, f"{provider} timed out. Retrying.", str(error))
+                error_message = self._safe_external_error(error)
+                task.reason = error_message
+                await self.store.save_task(run, task)
+                await self._operation(
+                    run,
+                    task,
+                    f"{provider} timed out. Retrying.",
+                    error_message,
+                )
                 await asyncio.sleep(0.25 * (attempt + 1))
             except httpx.HTTPStatusError as error:
                 raise ToolError(
@@ -623,6 +931,7 @@ class Orchestrator:
     async def _start_task(self, run: RunState, task: TaskNode) -> None:
         task.status = TaskStatus.running
         task.started_at = utc_now()
+        await self.store.save_task(run, task)
         await self.store.save_run(run)
         await self._operation(run, task, f"{task.title} started.", task.description)
 
@@ -633,13 +942,179 @@ class Orchestrator:
         task.summary = summary
         task.reason = reason
         task.completed_at = utc_now()
+        await self.store.save_task(run, task)
         await self.store.save_run(run)
         await self._operation(run, task, summary, reason)
+
+    async def _persist_graph(self, run: RunState) -> None:
+        if not run.graph:
+            return
+        for task in run.graph.tasks:
+            await self.store.save_task(run, task)
+
+    async def _record_model_call(
+        self,
+        run: RunState,
+        metrics: ModelMetrics,
+    ) -> None:
+        call = ModelCallRecord(
+            run_id=run.id,
+            conversation_id=run.conversation_id,
+            user_id=run.user_id,
+            phase=metrics.phase,
+            model=metrics.model,
+            prompt_version=metrics.prompt_version,
+            status=metrics.status,
+            attempts=metrics.attempts,
+            latency_ms=metrics.latency_ms,
+            prompt_tokens=metrics.prompt_tokens,
+            completion_tokens=metrics.completion_tokens,
+            total_tokens=metrics.total_tokens,
+            error_code=metrics.error_code,
+            error_message=metrics.error_message,
+        )
+        await self.store.add_model_call(call)
+        run.model_calls += 1
+        run.agent_cycles += 1
+        run.retries += max(0, metrics.attempts - 1)
+        await self.store.save_run(run)
+        await self._event(
+            run,
+            event_type=(
+                "model_completed"
+                if metrics.status == "completed"
+                else "model_failed"
+            ),
+            status=metrics.status,
+            summary=(
+                f"Sarvam completed {metrics.phase} in {metrics.latency_ms / 1000:.1f}s."
+                if metrics.status == "completed"
+                else f"Sarvam could not complete {metrics.phase}."
+            ),
+            reason=metrics.error_message,
+            payload={
+                "model": metrics.model,
+                "phase": metrics.phase,
+                "attempts": metrics.attempts,
+                "latency_ms": metrics.latency_ms,
+                "prompt_tokens": metrics.prompt_tokens,
+                "completion_tokens": metrics.completion_tokens,
+                "total_tokens": metrics.total_tokens,
+                "error_code": metrics.error_code,
+            },
+        )
+
+    async def _model_replan(
+        self,
+        run: RunState,
+        *,
+        failure: dict[str, Any],
+        fallback_message: str,
+    ) -> ReplanDecision | None:
+        if (
+            not self.interpreter.has_model
+            or run.model_calls >= 8
+            or run.agent_cycles >= 12
+            or run.replans >= 3
+        ):
+            return None
+        previous_status = run.status
+        previous_phase = run.phase
+        run.status = RunStatus.replanning
+        run.phase = AgentPhase.replanning
+        await self.store.save_run(run)
+        await self._event(
+            run,
+            event_type="model_started",
+            status="running",
+            summary="Sarvam is evaluating a safe recovery route.",
+            payload={"failure": failure},
+        )
+        try:
+            result = await self.agent.replan(
+                constraints=run.constraints.model_dump(mode="json"),
+                graph=run.graph.model_dump(mode="json") if run.graph else {},
+                failure=failure,
+                attempts_remaining=run.replans < 2,
+            )
+            await self._record_model_call(run, result.metrics)
+            run.replans += 1
+            run.status = previous_status
+            run.phase = previous_phase
+            await self.store.save_run(run)
+            await self._event(
+                run,
+                event_type="replan_created",
+                status="completed",
+                summary=result.value.explanation,
+                payload={
+                    "action": result.value.action,
+                    "task_id": result.value.task_id,
+                    "provider": result.value.provider,
+                    "constraint_to_relax": result.value.constraint_to_relax,
+                },
+            )
+            return result.value
+        except SarvamModelError as error:
+            await self._record_model_call(run, error.metrics)
+            run.errors.append(f"Replanning failed: {error}")
+            run.status = previous_status
+            run.phase = previous_phase
+            await self.store.save_run(run)
+            await self._event(
+                run,
+                event_type="replan_unavailable",
+                status="failed",
+                summary=fallback_message,
+                reason=error.metrics.error_message,
+            )
+            return None
+
+    async def _event(
+        self,
+        run: RunState,
+        *,
+        event_type: str,
+        status: str,
+        summary: str,
+        reason: str | None = None,
+        task_id: str | None = None,
+        provider: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> AgentEvent:
+        event = await self.store.add_event(
+            AgentEvent(
+                run_id=run.id,
+                conversation_id=run.conversation_id,
+                user_id=run.user_id,
+                type=event_type,
+                phase=run.phase,
+                status=status,
+                summary=summary,
+                reason=reason,
+                task_id=task_id,
+                provider=provider,
+                payload=payload or {},
+            )
+        )
+        run.last_event_id = event.id
+        await self.store.save_run(run)
+        return event
 
     async def _operation(
         self, run: RunState, task: TaskNode, summary: str, reason: str | None
     ) -> None:
         event = OperationEvent(task_id=task.id, status=task.status, summary=summary, reason=reason)
+        await self._event(
+            run,
+            event_type="task_updated",
+            status=task.status.value,
+            summary=summary,
+            reason=reason,
+            task_id=task.id,
+            provider=task.provider,
+            payload={"event": event.model_dump(mode="json")},
+        )
         await self._message(
             run,
             MessageKind.operation,
@@ -672,6 +1147,7 @@ class Orchestrator:
         report_task.status = TaskStatus.completed
         report_task.summary = "Execution report created"
         report_task.completed_at = utc_now()
+        await self.store.save_task(run, report_task)
         await self.store.save_run(run)
         user = UserIdentity(id=run.user_id, email="")
         report = await self.report(user, run.id)
@@ -687,6 +1163,19 @@ class Orchestrator:
         if not run.graph:
             raise ValueError("Run has no task graph")
         return next(task for task in run.graph.tasks if task.id == task_id)
+
+    @staticmethod
+    def _task_or_none(run: RunState, task_id: str) -> TaskNode | None:
+        if not run.graph:
+            return None
+        return next((task for task in run.graph.tasks if task.id == task_id), None)
+
+    @staticmethod
+    def _safe_external_error(error: Exception) -> str:
+        if isinstance(error, httpx.HTTPError):
+            return f"{type(error).__name__} while contacting the provider"
+        message = str(error).strip()
+        return (message or type(error).__name__)[:300]
 
     @staticmethod
     def _clarification(constraints: TravelConstraints) -> str:
@@ -715,7 +1204,17 @@ class Orchestrator:
 
     @staticmethod
     def _impossible_budget_message(constraints: TravelConstraints, result: SolverResult) -> str:
-        common = max(result.rejection_summary, key=result.rejection_summary.get, default="budget")
+        common = max(
+            result.rejection_summary,
+            key=result.rejection_summary.get,
+            default="availability",
+        )
+        if constraints.budget is None:
+            return (
+                "I couldn’t find a valid flight-and-hotel combination without breaking "
+                f"a hard constraint. The most common conflict was: {common}. "
+                "Which constraint may I change?"
+            )
         return (
             f"I couldn’t find a package under ₹{constraints.budget:,} without breaking "
             f"a hard constraint. The most common conflict was: {common}. "

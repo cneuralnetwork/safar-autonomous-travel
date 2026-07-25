@@ -17,7 +17,7 @@ def compare_packages(
     hotels: list[HotelOption],
     constraints: TravelConstraints,
 ) -> SolverResult:
-    budget = constraints.budget or 0
+    budget = constraints.budget
     days = constraints.duration_days or 1
     on_trip_reserve = 1500 * constraints.adults * days
     local_transfer_reserve = 1200
@@ -50,7 +50,7 @@ def compare_packages(
             total = (
                 flight.total_price + hotel.total_price + on_trip_reserve + local_transfer_reserve
             )
-            if total > budget:
+            if budget is not None and total > budget:
                 reasons.append("package exceeds the total budget")
             if reasons:
                 rejected_count += 1
@@ -65,7 +65,7 @@ def compare_packages(
                     on_trip_reserve=on_trip_reserve,
                     local_transfer_reserve=local_transfer_reserve,
                     total_price=total,
-                    remaining_budget=budget - total,
+                    remaining_budget=(budget - total if budget is not None else None),
                     score=0,
                 )
             )

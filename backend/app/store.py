@@ -11,7 +11,15 @@ import httpx
 from cryptography.fernet import Fernet
 
 from app.config import Settings
-from app.models import ChatMessage, Conversation, RunState, UserPreferences
+from app.models import (
+    AgentEvent,
+    ChatMessage,
+    Conversation,
+    ModelCallRecord,
+    RunState,
+    TaskNode,
+    UserPreferences,
+)
 
 
 class StoreError(RuntimeError):
@@ -25,6 +33,9 @@ class IdempotencyConflict(StoreError):
 class Store(ABC):
     @abstractmethod
     async def initialize(self) -> None: ...
+
+    @abstractmethod
+    async def close(self) -> None: ...
 
     @abstractmethod
     async def create_conversation(self, conversation: Conversation) -> Conversation: ...
@@ -64,6 +75,38 @@ class Store(ABC):
 
     @abstractmethod
     async def list_recoverable_runs(self) -> list[RunState]: ...
+
+    @abstractmethod
+    async def add_event(self, event: AgentEvent) -> AgentEvent: ...
+
+    @abstractmethod
+    async def list_events(
+        self,
+        run_id: UUID,
+        user_id: str,
+        *,
+        after_id: int = 0,
+        limit: int = 200,
+    ) -> list[AgentEvent]: ...
+
+    @abstractmethod
+    async def add_model_call(self, call: ModelCallRecord) -> None: ...
+
+    @abstractmethod
+    async def list_model_calls(
+        self,
+        run_id: UUID,
+        user_id: str,
+    ) -> list[ModelCallRecord]: ...
+
+    @abstractmethod
+    async def save_task(self, run: RunState, task: TaskNode) -> None: ...
+
+    @abstractmethod
+    async def claim_run(self, run_id: UUID, worker_id: str) -> bool: ...
+
+    @abstractmethod
+    async def release_run(self, run_id: UUID, worker_id: str) -> None: ...
 
     @abstractmethod
     async def save_calendar_connection(self, user_id: str, payload: dict[str, Any]) -> None: ...
@@ -143,6 +186,37 @@ class SQLiteStore(Store):
                     user_id text primary key,
                     payload text not null,
                     updated_at text not null
+                );
+
+                create table if not exists agent_events (
+                    id integer primary key autoincrement,
+                    run_id text not null,
+                    conversation_id text not null,
+                    user_id text not null,
+                    payload text not null,
+                    created_at text not null
+                );
+                create index if not exists agent_events_run_id
+                    on agent_events(run_id, id);
+
+                create table if not exists model_calls (
+                    id text primary key,
+                    run_id text not null,
+                    conversation_id text not null,
+                    user_id text not null,
+                    payload text not null,
+                    created_at text not null
+                );
+                create index if not exists model_calls_run_created
+                    on model_calls(run_id, created_at);
+
+                create table if not exists run_tasks (
+                    run_id text not null,
+                    task_id text not null,
+                    user_id text not null,
+                    payload text not null,
+                    updated_at text not null,
+                    primary key (run_id, task_id)
                 );
                 """
             )
@@ -308,12 +382,120 @@ class SQLiteStore(Store):
             cursor = db.execute(
                 """
                 select payload from runs
-                where status in ('planned', 'running')
+                where status in ('planned', 'running', 'replanning')
                 order by updated_at asc
                 """
             )
             rows = cursor.fetchall()
         return [RunState.model_validate_json(row[0]) for row in rows]
+
+    async def close(self) -> None:
+        if self._memory_connection is not None:
+            self._memory_connection.close()
+            self._memory_connection = None
+
+    async def add_event(self, event: AgentEvent) -> AgentEvent:
+        with self._connect() as db:
+            cursor = db.execute(
+                """
+                insert into agent_events(
+                    run_id, conversation_id, user_id, payload, created_at
+                ) values (?, ?, ?, ?, ?)
+                """,
+                (
+                    str(event.run_id),
+                    str(event.conversation_id),
+                    event.user_id,
+                    event.model_dump_json(exclude={"id"}),
+                    event.created_at.isoformat(),
+                ),
+            )
+            event.id = int(cursor.lastrowid)
+            db.execute(
+                "update agent_events set payload = ? where id = ?",
+                (event.model_dump_json(), event.id),
+            )
+        return event
+
+    async def list_events(
+        self,
+        run_id: UUID,
+        user_id: str,
+        *,
+        after_id: int = 0,
+        limit: int = 200,
+    ) -> list[AgentEvent]:
+        with self._connect() as db:
+            cursor = db.execute(
+                """
+                select payload from agent_events
+                where run_id = ? and user_id = ? and id > ?
+                order by id asc limit ?
+                """,
+                (str(run_id), user_id, after_id, limit),
+            )
+            rows = cursor.fetchall()
+        return [AgentEvent.model_validate_json(row[0]) for row in rows]
+
+    async def add_model_call(self, call: ModelCallRecord) -> None:
+        with self._connect() as db:
+            db.execute(
+                """
+                insert into model_calls(
+                    id, run_id, conversation_id, user_id, payload, created_at
+                ) values (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(call.id),
+                    str(call.run_id),
+                    str(call.conversation_id),
+                    call.user_id,
+                    call.model_dump_json(),
+                    call.created_at.isoformat(),
+                ),
+            )
+
+    async def list_model_calls(
+        self,
+        run_id: UUID,
+        user_id: str,
+    ) -> list[ModelCallRecord]:
+        with self._connect() as db:
+            cursor = db.execute(
+                """
+                select payload from model_calls
+                where run_id = ? and user_id = ?
+                order by created_at asc
+                """,
+                (str(run_id), user_id),
+            )
+            rows = cursor.fetchall()
+        return [ModelCallRecord.model_validate_json(row[0]) for row in rows]
+
+    async def save_task(self, run: RunState, task: TaskNode) -> None:
+        with self._connect() as db:
+            db.execute(
+                """
+                insert into run_tasks(run_id, task_id, user_id, payload, updated_at)
+                values (?, ?, ?, ?, ?)
+                on conflict(run_id, task_id) do update set
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(run.id),
+                    task.id,
+                    run.user_id,
+                    task.model_dump_json(),
+                    datetime.now().isoformat(),
+                ),
+            )
+
+    async def claim_run(self, run_id: UUID, worker_id: str) -> bool:
+        return True
+
+    async def release_run(self, run_id: UUID, worker_id: str) -> None:
+        return None
 
     async def save_calendar_connection(self, user_id: str, payload: dict[str, Any]) -> None:
         with self._connect() as db:
@@ -379,15 +561,27 @@ class SupabaseStore(Store):
         self.client = httpx.AsyncClient(timeout=20)
 
     async def initialize(self) -> None:
-        response = await self.client.get(
-            f"{self.base_url}/conversations",
-            headers=self.headers,
-            params={"select": "id", "limit": "1"},
-        )
-        if response.status_code >= 400:
-            raise StoreError(
-                "Supabase schema is unavailable. Apply the migration before starting production."
+        required_schema = {
+            "conversations": "id",
+            "runs": "id,harness_version,phase",
+            "run_tasks": "run_id,task_id",
+            "agent_events": "id",
+            "model_calls": "id",
+        }
+        for table, columns in required_schema.items():
+            response = await self.client.get(
+                f"{self.base_url}/{table}",
+                headers=self.headers,
+                params={"select": columns, "limit": "1"},
             )
+            if response.status_code >= 400:
+                raise StoreError(
+                    "Supabase agent schema is unavailable. "
+                    "Apply every migration before starting production."
+                )
+
+    async def close(self) -> None:
+        await self.client.aclose()
 
     async def _request(
         self,
@@ -537,6 +731,8 @@ class SupabaseStore(Store):
             "conversation_id": str(run.conversation_id),
             "user_id": run.user_id,
             "status": run.status.value,
+            "harness_version": run.harness_version,
+            "phase": run.phase.value,
             "state": run.model_dump(mode="json"),
             "updated_at": datetime.now().isoformat(),
         }
@@ -580,11 +776,107 @@ class SupabaseStore(Store):
             "runs",
             params={
                 "select": "state",
-                "status": "in.(planned,running)",
+                "status": "in.(planned,running,replanning)",
                 "order": "updated_at.asc",
             },
         )
         return [RunState.model_validate(row["state"]) for row in rows]
+
+    async def add_event(self, event: AgentEvent) -> AgentEvent:
+        row = event.model_dump(mode="json", exclude={"id"})
+        inserted = await self._request(
+            "POST",
+            "agent_events",
+            json_body=row,
+            prefer="return=representation",
+        )
+        if not inserted:
+            raise StoreError("Agent event insert returned no row")
+        return AgentEvent.model_validate(inserted[0])
+
+    async def list_events(
+        self,
+        run_id: UUID,
+        user_id: str,
+        *,
+        after_id: int = 0,
+        limit: int = 200,
+    ) -> list[AgentEvent]:
+        rows = await self._request(
+            "GET",
+            "agent_events",
+            params={
+                "select": "*",
+                "run_id": f"eq.{run_id}",
+                "user_id": f"eq.{user_id}",
+                "id": f"gt.{after_id}",
+                "order": "id.asc",
+                "limit": str(min(max(limit, 1), 500)),
+            },
+        )
+        return [AgentEvent.model_validate(row) for row in rows]
+
+    async def add_model_call(self, call: ModelCallRecord) -> None:
+        await self._request(
+            "POST",
+            "model_calls",
+            json_body=call.model_dump(mode="json"),
+            prefer="return=minimal",
+        )
+
+    async def list_model_calls(
+        self,
+        run_id: UUID,
+        user_id: str,
+    ) -> list[ModelCallRecord]:
+        rows = await self._request(
+            "GET",
+            "model_calls",
+            params={
+                "select": "*",
+                "run_id": f"eq.{run_id}",
+                "user_id": f"eq.{user_id}",
+                "order": "created_at.asc",
+            },
+        )
+        return [ModelCallRecord.model_validate(row) for row in rows]
+
+    async def save_task(self, run: RunState, task: TaskNode) -> None:
+        await self._request(
+            "POST",
+            "run_tasks",
+            json_body={
+                "run_id": str(run.id),
+                "task_id": task.id,
+                "user_id": run.user_id,
+                "status": task.status.value,
+                "payload": task.model_dump(mode="json"),
+                "updated_at": datetime.now().isoformat(),
+            },
+            prefer="return=minimal,resolution=merge-duplicates",
+        )
+
+    async def claim_run(self, run_id: UUID, worker_id: str) -> bool:
+        result = await self._request(
+            "POST",
+            "rpc/claim_agent_run",
+            json_body={
+                "p_run_id": str(run_id),
+                "p_worker_id": worker_id,
+                "p_lease_seconds": 120,
+            },
+        )
+        return bool(result)
+
+    async def release_run(self, run_id: UUID, worker_id: str) -> None:
+        await self._request(
+            "POST",
+            "rpc/release_agent_run",
+            json_body={
+                "p_run_id": str(run_id),
+                "p_worker_id": worker_id,
+            },
+        )
 
     async def save_calendar_connection(self, user_id: str, payload: dict[str, Any]) -> None:
         await self._request(

@@ -6,23 +6,23 @@
     "orientation": "portrait",
     "scheme": "safar",
     "userInterfaceStyle": "light",
-    "backgroundColor": "#EFEFED",
-    "icon": "./assets/icon.png",
+    "backgroundColor": "#FAFAFD",
+    "icon": "./assets/generated/safar-app-icon.png",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "app.safar.travel"
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#EFEFED"
+        "foregroundImage": "./assets/generated/safar-app-icon.png",
+        "backgroundColor": "#11184C"
       },
       "package": "app.safar.travel"
     },
     "web": {
       "bundler": "metro",
       "output": "static",
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/generated/safar-app-icon.png"
     },
     "plugins": [
       "expo-router",
@@ -37,10 +37,10 @@
       [
         "expo-splash-screen",
         {
-          "image": "./assets/splash-icon.png",
+          "image": "./assets/generated/safar-app-icon.png",
           "imageWidth": 180,
           "resizeMode": "contain",
-          "backgroundColor": "#EFEFED"
+          "backgroundColor": "#FAFAFD"
         }
       ]
     ],
