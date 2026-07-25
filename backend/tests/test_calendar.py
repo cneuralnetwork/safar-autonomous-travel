@@ -1,10 +1,11 @@
 from datetime import UTC, date, datetime, timedelta
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
 from app.calendar_service import CalendarService
 from app.config import Settings
-from app.models import Itinerary, ItineraryDay, ItineraryItem
+from app.models import Itinerary, ItineraryDay, ItineraryItem, UserIdentity
 from app.store import SQLiteStore, TokenCipher
 
 
@@ -65,3 +66,34 @@ async def test_calendar_event_writes_are_idempotent_upserts(tmp_path) -> None:
     assert requests[0].url.path.endswith(
         CalendarService._event_id("user-1", "run-1", "item-1")
     )
+
+
+async def test_calendar_permission_denial_is_immediately_observable(tmp_path) -> None:
+    store = SQLiteStore(str(tmp_path / "calendar-denial.db"))
+    await store.initialize()
+    service = CalendarService(
+        Settings(
+            google_client_id="client-id",
+            google_client_secret="client-secret",
+            public_base_url="https://safar.example",
+        ),
+        store,
+        TokenCipher(None),
+    )
+    user = UserIdentity(
+        id="user-1",
+        email="traveller@example.com",
+        google_sub="google-subject",
+    )
+    connection = service.start(user)
+    state = parse_qs(urlparse(connection["authorization_url"]).query)["state"][0]
+
+    attempt = await service.callback(state, None, "access_denied")
+    status = await service.status(user.id)
+
+    assert attempt.status == "failed"
+    assert status == {
+        "connected": False,
+        "authorization_status": "failed",
+        "error": "Calendar permission was denied.",
+    }

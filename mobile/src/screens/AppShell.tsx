@@ -148,6 +148,9 @@ export function AppShell() {
     for (let count = 0; count < 90; count += 1) {
       const current = await api.calendarStatus(accessToken);
       if (current.connected) return true;
+      if (current.authorization_status === 'failed') {
+        throw new Error(current.error || 'Calendar permission was not granted.');
+      }
       await wait(1000);
     }
     return false;
@@ -407,7 +410,7 @@ function PlanScreen({
             message={item}
             activeGraph={
               item.run_id === snapshot.active_run?.id
-                ? snapshot.active_run.graph
+                ? snapshot.active_run?.graph
                 : undefined
             }
             onQuickReply={(reply) => void onSend(reply)}

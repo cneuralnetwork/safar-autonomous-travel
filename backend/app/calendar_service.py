@@ -35,7 +35,24 @@ class CalendarService:
 
     async def status(self, user_id: str) -> dict[str, Any]:
         connection = await self.store.get_calendar_connection(user_id)
-        return {"connected": bool(connection)}
+        attempts = [
+            attempt
+            for attempt in self.attempts.values()
+            if attempt.user.id == user_id
+        ]
+        latest = max(attempts, key=lambda attempt: attempt.expires_at, default=None)
+        if (
+            latest
+            and latest.status == "pending"
+            and latest.expires_at < datetime.now(UTC)
+        ):
+            latest.status = "failed"
+            latest.error = "Calendar connection expired. Please try again."
+        return {
+            "connected": bool(connection),
+            "authorization_status": latest.status if latest else None,
+            "error": latest.error if latest else None,
+        }
 
     def start(self, user: UserIdentity) -> dict[str, Any]:
         if not self.settings.google_client_id or not self.settings.google_client_secret:

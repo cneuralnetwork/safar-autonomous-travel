@@ -112,7 +112,11 @@ export const api = {
   },
 
   calendarStatus(accessToken: string) {
-    return apiRequest<{ connected: boolean }>('/v1/calendar/status', accessToken);
+    return apiRequest<{
+      connected: boolean;
+      authorization_status?: 'pending' | 'completed' | 'failed';
+      error?: string;
+    }>('/v1/calendar/status', accessToken);
   },
 
   connectCalendar(accessToken: string) {
@@ -163,4 +167,3 @@ export const authApi = {
     };
   },
 };
-
